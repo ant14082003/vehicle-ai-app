@@ -1,0 +1,54 @@
+{
+  "project_info": {
+    "project_number": "442530434893",
+    "project_id": "vehicle-doc-intelligence",
+    "storage_bucket": "vehicle-doc-intelligence.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:442530434893:android:97985ce223ff8d0ac3b104",
+        "android_client_info": {
+          "package_name": "com.example.vehicle_ai_app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "442530434893-7ggnj25snoas5r26rmokd1di85odabvv.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.vehicle_ai_app",
+            "certificate_hash": "f08c9afab70e187aff77ddd7b24f42ca9819393a"
+          }
+        },
+        {
+          "client_id": "442530434893-8bdd6clkfvfdjgdf8mlu1jdcn1m9704j.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAgPCpaGu7RCaCvULSN2RTBiToer5jK5Zo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "442530434893-8bdd6clkfvfdjgdf8mlu1jdcn1m9704j.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "442530434893-191bm03qvbp6l4to28kes19qgjn46a7e.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.vehicleAiApp"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
