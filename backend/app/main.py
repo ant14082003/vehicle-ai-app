@@ -16,11 +16,11 @@ import os
 # ─────────────────────────────────────────────
 #  CONFIG
 # ─────────────────────────────────────────────
-SUREPASS_TOKEN      = "YOUR_SUREPASS_TOKEN_HERE"
-GROQ_KEY            = ""
-UNSPLASH_ACCESS_KEY = "YOUR_UNSPLASH_KEY_HERE"
-GOOGLE_API_KEY      = "YOUR_GOOGLE_API_KEY_HERE"
-GOOGLE_CX           = "YOUR_GOOGLE_CX_HERE"
+GROQ_KEY            = os.environ.get("GROQ_KEY", "")
+SUREPASS_TOKEN      = os.environ.get("SUREPASS_TOKEN", "YOUR_SUREPASS_TOKEN_HERE")
+UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "")
+GOOGLE_API_KEY      = os.environ.get("GOOGLE_API_KEY", "")
+GOOGLE_CX           = os.environ.get("GOOGLE_CX", "")
 
 CHUNK_SIZE    = 800
 CHUNK_OVERLAP = 100
