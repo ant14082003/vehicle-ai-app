@@ -42,7 +42,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+import os
+import platform
+if platform.system() == "Windows":
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+# On Linux (Railway), tesseract is installed automatically via nixpacks
 groq_client = Groq(api_key=GROQ_KEY)
 
 
