@@ -151,16 +151,27 @@ python -m uvicorn app.main:app --reload
 (Add your screenshots here)
 
 * Garage Screen
-* Vehicle Profile
-* Upload Document Screen
-* Dashboard
-* Damage Detection Result
+  <img width="483" height="825" alt="image" src="https://github.com/user-attachments/assets/14f7edd2-33a2-4a53-877a-a616855d8c90" />
 
+* Vehicle Profile
+  <img width="508" height="940" alt="image" src="https://github.com/user-attachments/assets/e997bcb9-00b7-4864-98ce-8f6f6ca44e4f" />
+
+* Upload Document Screen
+  <img width="508" height="940" alt="image" src="https://github.com/user-attachments/assets/c290475a-94a4-43b1-8e9e-b0e8d2482ec0" />
+  
+* Damage Detection
+  <img width="508" height="951" alt="image" src="https://github.com/user-attachments/assets/521d2974-7b4a-4972-9d16-39826045bcc0" />
+
+* Predictive Maintainance
+  <img width="507" height="951" alt="image" src="https://github.com/user-attachments/assets/b7d8ad42-0e03-4c6b-9fe1-6f0085861c41" />
+* AI Vehicle assistant
+  <img width="464" height="879" alt="image" src="https://github.com/user-attachments/assets/a8750e60-7e84-4b18-88a8-03b0230c46c5" />
+
+  
 ---
 
 # 🔮 Future Enhancements
 
-* AI chatbot assistant
 * Real-time notifications
 * Cloud database integration
 * Advanced ML damage analysis
@@ -170,7 +181,7 @@ python -m uvicorn app.main:app --reload
 
 # 👨‍💻 Author
 
-Your Name
+Anant Anveri
 
 ---
 
