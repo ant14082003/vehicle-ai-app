@@ -5,9 +5,9 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
-
 import '../../theme/app_theme.dart';
 import '../../constants.dart';
+import 'document_viewer_screen.dart';
 
 class ServiceBillScreen extends StatefulWidget {
   final String vehicleNumber;
@@ -163,6 +163,71 @@ class _ServiceBillScreenState extends State<ServiceBillScreen>
     }
   }
 
+  Future<void> _deleteBill(Map bill) async {
+    final index = _bills.indexWhere(
+      (b) => b["url"] == bill["url"] && b["uploaded_at"] == bill["uploaded_at"],
+    );
+    if (index == -1) {
+      _snack("Could not find bill index");
+      return;
+    }
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text("Delete Service Bill"),
+        content: const Text(
+          "Are you sure you want to delete this service bill?",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text("Cancel"),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text("Delete"),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    try {
+      print("DELETE INDEX = $index");
+      print("DELETE USER = ${AppConstants.userId}");
+      print("DELETE VEHICLE = ${widget.vehicleNumber}");
+      print(
+        "DELETE URL = ${Uri.parse("$baseUrl/service-bill"
+        "?vehicleNumber=${widget.vehicleNumber}"
+        "&billIndex=$index"
+        "&userId=${AppConstants.userId}")}",
+      );
+      final res = await http.delete(
+        Uri.parse(
+          "$baseUrl/service-bill"
+          "?vehicleNumber=${widget.vehicleNumber}"
+          "&billIndex=$index"
+          "&userId=${AppConstants.userId}",
+        ),
+      );
+      print("DELETE STATUS = ${res.statusCode}");
+      print("DELETE RESPONSE = ${res.body}");
+
+      final data = jsonDecode(res.body);
+
+      _snack(data["message"] ?? "Deleted");
+
+      await _loadBills();
+      if (mounted) {
+        setState(() {});
+      }
+    } catch (e) {
+      _snack("Delete failed: $e");
+    }
+  }
+
   void _snack(String msg) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
@@ -284,6 +349,7 @@ class _ServiceBillScreenState extends State<ServiceBillScreen>
               ),
 
               // Header
+              // Header
               Row(
                 children: [
                   Container(
@@ -298,7 +364,9 @@ class _ServiceBillScreenState extends State<ServiceBillScreen>
                       size: 22,
                     ),
                   ),
+
                   const SizedBox(width: 14),
+
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -310,6 +378,17 @@ class _ServiceBillScreenState extends State<ServiceBillScreen>
                         ),
                       ],
                     ),
+                  ),
+
+                  IconButton(
+                    icon: const Icon(
+                      Icons.delete_outline_rounded,
+                      color: Colors.red,
+                    ),
+                    onPressed: () async {
+                      Navigator.pop(context);
+                      await _deleteBill(bill);
+                    },
                   ),
                 ],
               ),
@@ -352,39 +431,35 @@ class _ServiceBillScreenState extends State<ServiceBillScreen>
                     ),
                   ),
                 ),
-                const SizedBox(height: 20),
-              ],
+                const SizedBox(height: 16),
 
-              // Preview text
-              if (bill["preview"] != null &&
-                  (bill["preview"] as String).isNotEmpty) ...[
-                Row(
-                  children: [
-                    const Icon(
-                      Icons.text_snippet_rounded,
-                      color: AppTheme.textMuted,
-                      size: 16,
-                    ),
-                    const SizedBox(width: 8),
-                    Text("Raw OCR Preview", style: AppTheme.labelSmall),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: AppTheme.bg,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: AppTheme.border),
-                  ),
-                  child: Text(
-                    bill["preview"],
-                    style: AppTheme.bodyMedium.copyWith(
-                      fontSize: 11,
-                      fontFamily: 'monospace',
-                    ),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: () {
+                      final url = bill["url"];
+
+                      if (url == null) return;
+
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => DocumentViewerScreen(
+                            url: url,
+                            title: "Service Bill",
+                            uploadedAt: bill["uploaded_at"],
+                          ),
+                        ),
+                      );
+                    },
+                    style: AppTheme.primaryButton,
+                    icon: const Icon(Icons.receipt_long_rounded),
+                    label: const Text("View Uploaded Bill"),
                   ),
                 ),
+
+                const SizedBox(height: 12),
+                const SizedBox(height: 20),
               ],
               const SizedBox(height: 30),
             ],
@@ -555,19 +630,18 @@ class _ServiceBillScreenState extends State<ServiceBillScreen>
                     // Header
                     Padding(
                       padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
-                      child: Row(
-                        children: [
-                          SectionHeader(
-                            title: "Service History",
-                            icon: Icons.history_rounded,
-                            trailing: _bills.isNotEmpty
-                                ? StatusBadge(
-                                    label: "${_bills.length} record(s)",
-                                    color: AppTheme.accent,
-                                  )
-                                : null,
-                          ),
-                        ],
+                      child: SizedBox(
+                        width: double.infinity,
+                        child: SectionHeader(
+                          title: "Service History",
+                          icon: Icons.history_rounded,
+                          trailing: _bills.isNotEmpty
+                              ? StatusBadge(
+                                  label: "${_bills.length} record(s)",
+                                  color: AppTheme.accent,
+                                )
+                              : null,
+                        ),
                       ),
                     ),
 

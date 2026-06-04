@@ -46,6 +46,8 @@ print("FINAL TESSERACT CMD:", pytesseract.pytesseract.tesseract_cmd)
 GROQ_KEY            = os.environ.get("GROQ_KEY", "")
 SUREPASS_TOKEN      = os.environ.get("SUREPASS_TOKEN", "YOUR_SUREPASS_TOKEN_HERE")
 UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "")
+print("UNSPLASH ENABLED =", bool(UNSPLASH_ACCESS_KEY))
+print("UNSPLASH KEY LENGTH =", len(UNSPLASH_ACCESS_KEY))
 GOOGLE_API_KEY      = os.environ.get("GOOGLE_API_KEY", "")
 GOOGLE_CX           = os.environ.get("GOOGLE_CX", "")
 
@@ -1098,37 +1100,49 @@ def _smart_mock(vehicle_number: str) -> dict:
 # ─────────────────────────────────────────────
 #  Vehicle Image
 # ─────────────────────────────────────────────
-WIKIMEDIA_VEHICLE_IMAGES = {
-    "activa 6g":      "https://upload.wikimedia.org/wikipedia/commons/thumb/4/4e/Honda_Activa_6G.jpg/800px-Honda_Activa_6G.jpg",
-    "activa":         "https://upload.wikimedia.org/wikipedia/commons/thumb/4/4e/Honda_Activa_6G.jpg/800px-Honda_Activa_6G.jpg",
-    "dio":            "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Honda_Dio_2021.jpg/800px-Honda_Dio_2021.jpg",
-    "cb shine":       "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b8/Honda_CB_Shine.jpg/800px-Honda_CB_Shine.jpg",
-    "himalayan":      "https://upload.wikimedia.org/wikipedia/commons/thumb/f/f1/Royal_Enfield_Himalayan_%282021%29.jpg/800px-Royal_Enfield_Himalayan_%282021%29.jpg",
-    "classic 350":    "https://upload.wikimedia.org/wikipedia/commons/thumb/9/9f/Royal_Enfield_Classic_350_%282021%29.jpg/800px-Royal_Enfield_Classic_350_%282021%29.jpg",
-    "pulsar 150":     "https://upload.wikimedia.org/wikipedia/commons/thumb/6/6d/Bajaj_Pulsar_150.jpg/800px-Bajaj_Pulsar_150.jpg",
-    "pulsar ns200":   "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0b/Bajaj_Pulsar_NS200.jpg/800px-Bajaj_Pulsar_NS200.jpg",
-    "duke 390":       "https://upload.wikimedia.org/wikipedia/commons/thumb/d/d6/KTM_390_Duke_2023.jpg/800px-KTM_390_Duke_2023.jpg",
-    "duke 200":       "https://upload.wikimedia.org/wikipedia/commons/thumb/8/82/KTM_Duke_200.jpg/800px-KTM_Duke_200.jpg",
-    "r15":            "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3b/Yamaha_YZF-R15_V4.jpg/800px-Yamaha_YZF-R15_V4.jpg",
-    "fz":             "https://upload.wikimedia.org/wikipedia/commons/thumb/8/8e/Yamaha_FZ-S_V3.jpg/800px-Yamaha_FZ-S_V3.jpg",
-    "apache rtr 160": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/2a/TVS_Apache_RTR_160_4V.jpg/800px-TVS_Apache_RTR_160_4V.jpg",
-    "jupiter":        "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5b/TVS_Jupiter.jpg/800px-TVS_Jupiter.jpg",
-    "splendor":       "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e3/Hero_Splendor_Plus_Black.jpg/800px-Hero_Splendor_Plus_Black.jpg",
-    "glamour":        "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1c/Hero_Glamour.jpg/800px-Hero_Glamour.jpg",
-    "gixxer":         "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1e/Suzuki_Gixxer_SF_250.jpg/800px-Suzuki_Gixxer_SF_250.jpg",
-}
-
-
 def fetch_vehicle_image(maker: str, model: str) -> Optional[str]:
-    full    = f"{maker} {model}".lower()
-    maker_l = maker.lower()
-    if full.startswith(f"{maker_l} {maker_l}"):
-        full = full[len(maker_l):].strip()
-    for keyword, url in WIKIMEDIA_VEHICLE_IMAGES.items():
-        if keyword in full:
-            return url
-    return None
+    if not UNSPLASH_ACCESS_KEY:
+        print("[Unsplash] No API key found")
+        return None
 
+    try:
+        query = f"{maker} {model}"
+
+        print(f"[Unsplash] Searching for: {query}")
+
+        response = requests.get(
+            "https://api.unsplash.com/search/photos",
+            params={
+                "query": query,
+                "per_page": 1,
+                "orientation": "landscape",
+            },
+            headers={
+                "Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"
+            },
+            timeout=15,
+        )
+
+        print(f"[Unsplash] Status = {response.status_code}")
+
+        if response.status_code == 200:
+            data = response.json()
+            results = data.get("results", [])
+
+            if results:
+                image_url = results[0]["urls"]["regular"]
+                print(f"[Unsplash] Image Found = {image_url}")
+                return image_url
+
+            print(f"[Unsplash] No results for {query}")
+
+        else:
+            print(f"[Unsplash] Error response: {response.text}")
+
+    except Exception as e:
+        print(f"[Unsplash Error] {e}")
+
+    return None
 
 # ─────────────────────────────────────────────
 #  Manual Loading
@@ -2835,6 +2849,75 @@ def upload_service_bill(data: ServiceBillRequest):
     except Exception as e:
         return {"message": "Error processing service bill", "error": str(e)}
 
+@app.delete("/service-bill")
+def delete_service_bill(
+    vehicleNumber: str,
+    billIndex: int,
+    userId: str = "default"
+):
+    try:
+        print("========== DELETE SERVICE BILL ==========")
+        print("Vehicle =", vehicleNumber)
+        print("Bill Index =", billIndex)
+        print("User =", userId)
+
+        vehicle_number = normalize_vehicle_number(vehicleNumber)
+
+        vehicles = get_user_vehicles(userId)
+
+        target = next(
+            (
+                v for v in vehicles
+                if normalize_vehicle_number(v["vehicle_number"]) == vehicle_number
+            ),
+            None,
+        )
+
+        if not target:
+            return {
+                "message": "Vehicle not found."
+            }
+
+        bills = target.get("service_bills", [])
+
+        if billIndex < 0 or billIndex >= len(bills):
+            return {
+                "message": "Bill not found."
+            }
+
+        deleted_bill = bills.pop(billIndex)
+
+        # Delete file from Firebase Storage
+        file_url = deleted_bill.get("url")
+
+        try:
+            if file_url:
+                bucket = storage.bucket()
+
+                import urllib.parse
+
+                path = file_url.split("/o/")[1].split("?")[0]
+                path = urllib.parse.unquote(path)
+
+                blob = bucket.blob(path)
+
+                if blob.exists():
+                    blob.delete()
+                    print("Firebase file deleted:", path)
+
+        except Exception as e:
+            print("Firebase delete failed:", e)
+
+        return {
+            "message": "Service bill deleted successfully.",
+            "deleted_bill": deleted_bill,
+        }
+
+    except Exception as e:
+        return {
+            "message": "Failed to delete service bill.",
+            "error": str(e),
+        }
 
 @app.post("/upload-manual")
 def upload_manual(data: ManualUploadRequest):

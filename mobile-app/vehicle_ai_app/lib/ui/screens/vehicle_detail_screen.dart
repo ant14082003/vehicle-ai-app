@@ -83,8 +83,13 @@ class _VehicleDetailScreenState extends State<VehicleDetailScreen>
     setState(() => isLoading = true);
     try {
       final res = await http.get(
-        Uri.parse("$baseUrl/vehicle/${widget.vehicleNumber}"),
+        Uri.parse(
+          "$baseUrl/vehicle/${widget.vehicleNumber}"
+          "?userId=${AppConstants.userId}",
+        ),
       );
+      print("VEHICLE DETAILS RESPONSE:");
+      print(res.body);
       final data = jsonDecode(res.body);
       setState(() => vehicle = data is Map<String, dynamic> ? data : {});
       _anim.forward(from: 0);

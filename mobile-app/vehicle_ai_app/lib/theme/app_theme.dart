@@ -269,7 +269,14 @@ class SectionHeader extends StatelessWidget {
           child: Icon(icon, color: AppTheme.accent, size: 16),
         ),
         const SizedBox(width: 10),
-        Expanded(child: Text(title, style: AppTheme.titleMedium)),
+        Flexible(
+          fit: FlexFit.loose,
+          child: Text(
+            title,
+            style: AppTheme.titleMedium,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
         if (trailing != null) trailing!,
       ],
     );
