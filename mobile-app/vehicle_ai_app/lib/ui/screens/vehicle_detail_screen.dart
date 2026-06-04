@@ -11,6 +11,9 @@ import 'damage_detection_screen.dart';
 import 'predictive_maintenance_screen.dart';
 import 'insurance_claim_screen.dart';
 import 'upload_document_screen.dart';
+import 'service_bill_screen.dart';
+import '../../constants.dart';
+import 'document_viewer_screen.dart';
 
 class VehicleDetailScreen extends StatefulWidget {
   final String vehicleNumber;
@@ -22,7 +25,7 @@ class VehicleDetailScreen extends StatefulWidget {
 
 class _VehicleDetailScreenState extends State<VehicleDetailScreen>
     with SingleTickerProviderStateMixin {
-  static const String baseUrl = "http://127.0.0.1:8000";
+  final String baseUrl = AppConstants.baseUrl;
   Map<String, dynamic> vehicle = {};
   bool isLoading = true;
   late AnimationController _anim;
@@ -41,6 +44,39 @@ class _VehicleDetailScreenState extends State<VehicleDetailScreen>
   void dispose() {
     _anim.dispose();
     super.dispose();
+  }
+
+  void _openDocumentViewer(Map doc) {
+    final urls =
+        (doc["urls"] as List?)?.cast<String>() ?? [doc["url"] as String? ?? ""];
+    final docType = doc["type"] as String? ?? "Document";
+    final uploadedAt = doc["uploaded_at"] as String?;
+
+    if (urls.length == 1) {
+      // Single page — use simple viewer
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => DocumentViewerScreen(
+            url: urls.first,
+            title: "$docType Document",
+            uploadedAt: uploadedAt,
+          ),
+        ),
+      );
+    } else {
+      // Multiple pages — use multi-page viewer
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => MultiPageDocumentViewer(
+            urls: urls,
+            title: "$docType Document",
+            uploadedAt: uploadedAt,
+          ),
+        ),
+      );
+    }
   }
 
   Future<void> fetchVehicle() async {
@@ -441,6 +477,8 @@ class _VehicleDetailScreenState extends State<VehicleDetailScreen>
   // ── Feature quick actions ──────────────────────────────────────────────────
   Widget _buildFeatureActions() {
     final model = vehicle["model"] as String? ?? widget.vehicleNumber;
+    final billCount = (vehicle["service_bills"] as List?)?.length ?? 0;
+
     return Container(
       margin: const EdgeInsets.fromLTRB(20, 16, 20, 0),
       child: Column(
@@ -448,6 +486,8 @@ class _VehicleDetailScreenState extends State<VehicleDetailScreen>
         children: [
           SectionHeader(title: "Tools", icon: Icons.apps_rounded),
           const SizedBox(height: 12),
+
+          // ── Row 1: 4 feature tiles ─────────────────────────────────────
           Row(
             children: [
               _featureTile(
@@ -510,6 +550,62 @@ class _VehicleDetailScreenState extends State<VehicleDetailScreen>
                 ),
               ),
             ],
+          ),
+
+          const SizedBox(height: 10),
+
+          // ── Row 2: Service Bills full-width tile ───────────────────────
+          GestureDetector(
+            onTap: () async {
+              await Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => ServiceBillScreen(
+                    vehicleNumber: widget.vehicleNumber,
+                    vehicleModel: model,
+                  ),
+                ),
+              );
+              fetchVehicle(); // refresh after returning
+            },
+            child: Container(
+              padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+              decoration: BoxDecoration(
+                color: AppTheme.success.withOpacity(0.08),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: AppTheme.success.withOpacity(0.25)),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.receipt_long_rounded,
+                    color: AppTheme.success,
+                    size: 20,
+                  ),
+                  const SizedBox(width: 12),
+                  Text(
+                    "Service Bills & History",
+                    style: TextStyle(
+                      color: AppTheme.success,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 13,
+                    ),
+                  ),
+                  const Spacer(),
+                  if (billCount > 0)
+                    StatusBadge(
+                      label: "$billCount record${billCount > 1 ? 's' : ''}",
+                      color: AppTheme.success,
+                    ),
+                  const SizedBox(width: 8),
+                  Icon(
+                    Icons.arrow_forward_ios_rounded,
+                    color: AppTheme.success,
+                    size: 14,
+                  ),
+                ],
+              ),
+            ),
           ),
         ],
       ),
@@ -681,7 +777,7 @@ class _VehicleDetailScreenState extends State<VehicleDetailScreen>
             ),
           ),
           if (exists)
-            _smallBtn("View", () => _showDocSheet(doc), AppTheme.accent)
+            _smallBtn("View", () => _openDocumentViewer(doc), AppTheme.accent)
           else
             _smallBtn("Upload", () async {
               await Navigator.push(
@@ -759,7 +855,7 @@ class _VehicleDetailScreenState extends State<VehicleDetailScreen>
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    "No service bills yet. Upload via the AI chat.",
+                    "No service bills yet. Tap 'Service Bills & History' above to upload.",
                     style: AppTheme.bodyMedium.copyWith(fontSize: 12),
                   ),
                 ),

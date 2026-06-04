@@ -5,6 +5,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 
 import '../../theme/app_theme.dart';
 import 'vehicle_detail_screen.dart';
+import '../../constants.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -15,7 +16,7 @@ class DashboardScreen extends StatefulWidget {
 
 class _DashboardScreenState extends State<DashboardScreen>
     with SingleTickerProviderStateMixin {
-  static const String baseUrl = "http://127.0.0.1:8000";
+  final String baseUrl = AppConstants.baseUrl;
 
   bool isLoading = true;
   Map<String, dynamic> dashData = {};

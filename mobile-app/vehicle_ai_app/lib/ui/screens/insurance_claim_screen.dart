@@ -5,8 +5,14 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:dio/dio.dart';
+import 'package:open_filex/open_filex.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'dart:io';
 
 import '../../theme/app_theme.dart';
+import '../../constants.dart';
 
 class InsuranceClaimScreen extends StatefulWidget {
   final String vehicleNumber;
@@ -23,15 +29,17 @@ class InsuranceClaimScreen extends StatefulWidget {
 
 class _InsuranceClaimScreenState extends State<InsuranceClaimScreen>
     with SingleTickerProviderStateMixin {
-  static const String baseUrl = "http://127.0.0.1:8000";
+  final String baseUrl = AppConstants.baseUrl;
   final ImagePicker _picker = ImagePicker();
 
   final TextEditingController _descController = TextEditingController();
   final List<Uint8List> _accidentImages = [];
-  final List<String> _uploadedUrls = [];
 
   bool _isSubmitting = false;
+  bool _isGeneratingPdf = false;
   String _statusText = "";
+  double _pdfProgress = 0;
+
   Map<String, dynamic>? _result;
 
   late AnimationController _animController;
@@ -54,24 +62,26 @@ class _InsuranceClaimScreenState extends State<InsuranceClaimScreen>
     super.dispose();
   }
 
+  // ── Firebase upload ────────────────────────────────────────────────────────
   Future<String> _uploadToFirebase(Uint8List bytes, String ext) async {
     final ref = FirebaseStorage.instance.ref().child(
-      "claims/${DateTime.now().millisecondsSinceEpoch}_${_accidentImages.length}.$ext",
+      "claims/${AppConstants.userId}_"
+      "${DateTime.now().millisecondsSinceEpoch}.$ext",
     );
     await ref.putData(bytes);
     return ref.getDownloadURL();
   }
 
+  // ── Add photo ──────────────────────────────────────────────────────────────
   Future<void> _addPhoto({required bool fromCamera}) async {
-    Uint8List? bytes;
-    String ext = "jpg";
     if (fromCamera) {
       final picked = await _picker.pickImage(
         source: ImageSource.camera,
         imageQuality: 85,
       );
       if (picked == null) return;
-      bytes = await picked.readAsBytes();
+      final bytes = await picked.readAsBytes();
+      setState(() => _accidentImages.add(bytes));
     } else {
       final result = await FilePicker.platform.pickFiles(
         type: FileType.image,
@@ -82,26 +92,17 @@ class _InsuranceClaimScreenState extends State<InsuranceClaimScreen>
       for (final file in result.files) {
         setState(() => _accidentImages.add(file.bytes!));
       }
-      return;
     }
-    setState(() => _accidentImages.add(bytes!));
   }
 
+  // ── Submit claim ───────────────────────────────────────────────────────────
   Future<void> _submitClaim() async {
     if (_descController.text.trim().length < 20) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            "Please provide a detailed accident description (min 20 characters)",
-          ),
-        ),
-      );
+      _showSnack("Please describe the accident in at least 20 characters");
       return;
     }
     if (_accidentImages.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Please add at least one accident photo")),
-      );
+      _showSnack("Please add at least one accident photo");
       return;
     }
 
@@ -111,7 +112,6 @@ class _InsuranceClaimScreenState extends State<InsuranceClaimScreen>
     });
 
     try {
-      // Upload all accident images
       final urls = <String>[];
       for (int i = 0; i < _accidentImages.length; i++) {
         setState(
@@ -132,6 +132,7 @@ class _InsuranceClaimScreenState extends State<InsuranceClaimScreen>
           "accidentDescription": _descController.text.trim(),
           "imageUrls": urls,
           "documentUrls": [],
+          "userId": AppConstants.userId,
         }),
       );
 
@@ -139,13 +140,111 @@ class _InsuranceClaimScreenState extends State<InsuranceClaimScreen>
       setState(() => _result = data);
       _animController.forward(from: 0);
     } catch (e) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text("Error: $e")));
+      _showSnack("Error: $e");
     } finally {
       setState(() => _isSubmitting = false);
     }
   }
+
+  // ── Download PDF ───────────────────────────────────────────────────────────
+  Future<void> _downloadClaimReport() async {
+    if (_result == null) return;
+
+    // Android 29+ does NOT need storage permission for temp directory
+    if (Platform.isAndroid) {
+      final androidVersion = await _getAndroidSdk();
+      if (androidVersion < 29) {
+        final status = await Permission.storage.request();
+        if (!status.isGranted) {
+          _showSnack("Storage permission required");
+          return;
+        }
+      }
+    }
+
+    setState(() {
+      _isGeneratingPdf = true;
+      _pdfProgress = 0;
+    });
+
+    try {
+      final report = _result!["claim_report"] as Map? ?? {};
+      final checklist = (_result!["checklist"] as List?) ?? [];
+
+      final body = {
+        "vehicleNumber": widget.vehicleNumber,
+        "accidentDescription": _descController.text.trim(),
+        "claimReference": report["claim_reference"] ?? "",
+        "damageSummary": _result!["damage_summary"] ?? "",
+        "checklist": checklist,
+        "ownerName": report["owner"] ?? "",
+        "insuranceStatus": report["insurance_status"] ?? "",
+        "photosSubmitted": report["photos_submitted"] ?? 0,
+        "submittedAt": report["submitted_at"] ?? "",
+      };
+
+      // Save to temp dir — no permission needed on any Android version
+      final tempDir = await getTemporaryDirectory();
+      final filename =
+          "InsuranceClaim_${widget.vehicleNumber}_"
+          "${DateTime.now().millisecondsSinceEpoch}.pdf";
+      final tempPath = "${tempDir.path}/$filename";
+
+      await Dio().download(
+        "$baseUrl/insurance-claim/download-report",
+        tempPath,
+        data: body,
+        options: Options(
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          responseType: ResponseType.bytes,
+        ),
+        onReceiveProgress: (received, total) {
+          if (total > 0) {
+            setState(() => _pdfProgress = received / total);
+          }
+        },
+      );
+
+      setState(() {
+        _isGeneratingPdf = false;
+        _pdfProgress = 0;
+      });
+      _showSnack("Report ready — opening PDF...");
+
+      final openResult = await OpenFilex.open(tempPath);
+      if (openResult.type != ResultType.done) {
+        // Try copying to downloads
+        try {
+          final dl = Directory('/storage/emulated/0/Download');
+          if (dl.existsSync()) {
+            await File(tempPath).copy("${dl.path}/$filename");
+            _showSnack("Saved to Downloads/$filename");
+          }
+        } catch (_) {
+          _showSnack("PDF saved. Open from your file manager.");
+        }
+      }
+    } catch (e) {
+      setState(() {
+        _isGeneratingPdf = false;
+        _pdfProgress = 0;
+      });
+      _showSnack("Download failed: $e");
+    }
+  }
+
+  Future<int> _getAndroidSdk() async {
+    try {
+      final v = Platform.operatingSystemVersion;
+      final m = RegExp(r'API (\d+)').firstMatch(v);
+      if (m != null) return int.tryParse(m.group(1) ?? "30") ?? 30;
+    } catch (_) {}
+    return 30;
+  }
+
+  void _showSnack(String msg) =>
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
 
   // ── Build ──────────────────────────────────────────────────────────────────
   @override
@@ -185,6 +284,7 @@ class _InsuranceClaimScreenState extends State<InsuranceClaimScreen>
     );
   }
 
+  // ── Loading ────────────────────────────────────────────────────────────────
   Widget _buildLoading() => Center(
     child: Column(
       mainAxisSize: MainAxisSize.min,
@@ -198,13 +298,14 @@ class _InsuranceClaimScreenState extends State<InsuranceClaimScreen>
     ),
   );
 
+  // ── Form ───────────────────────────────────────────────────────────────────
   Widget _buildForm() {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Header
+          // Header card
           Container(
             padding: const EdgeInsets.all(16),
             decoration: AppTheme.cardDecoration,
@@ -230,7 +331,7 @@ class _InsuranceClaimScreenState extends State<InsuranceClaimScreen>
                     children: [
                       Text("Claim Assistant", style: AppTheme.titleLarge),
                       Text(
-                        "We'll guide you through the claim process step by step.",
+                        "We'll guide you through the claim process.",
                         style: AppTheme.bodyMedium.copyWith(fontSize: 12),
                       ),
                     ],
@@ -246,23 +347,17 @@ class _InsuranceClaimScreenState extends State<InsuranceClaimScreen>
           _stepCard(
             step: "01",
             title: "Accident Description",
-            child: Column(
-              children: [
-                TextField(
-                  controller: _descController,
-                  maxLines: 5,
-                  style: const TextStyle(
-                    color: AppTheme.textPrimary,
-                    fontSize: 13,
-                  ),
-                  decoration: const InputDecoration(
-                    hintText:
-                        "Describe the accident: when, where, what happened, other vehicles involved, injuries...",
-                    border: InputBorder.none,
-                    contentPadding: EdgeInsets.zero,
-                  ),
-                ),
-              ],
+            child: TextField(
+              controller: _descController,
+              maxLines: 5,
+              style: const TextStyle(color: AppTheme.textPrimary, fontSize: 13),
+              decoration: const InputDecoration(
+                hintText:
+                    "Describe the accident: when, where, what happened, "
+                    "other vehicles involved, injuries...",
+                border: InputBorder.none,
+                contentPadding: EdgeInsets.zero,
+              ),
             ),
           ),
 
@@ -354,7 +449,7 @@ class _InsuranceClaimScreenState extends State<InsuranceClaimScreen>
 
           const SizedBox(height: 12),
 
-          // Step 3 — Important note
+          // Info note
           Container(
             padding: const EdgeInsets.all(14),
             decoration: BoxDecoration(
@@ -416,7 +511,7 @@ class _InsuranceClaimScreenState extends State<InsuranceClaimScreen>
 
           const SizedBox(height: 20),
 
-          // Submit
+          // Submit button
           SizedBox(
             width: double.infinity,
             child: ElevatedButton.icon(
@@ -482,12 +577,12 @@ class _InsuranceClaimScreenState extends State<InsuranceClaimScreen>
     );
   }
 
+  // ── Result screen ──────────────────────────────────────────────────────────
   Widget _buildResult() {
     final checklist = (_result!["checklist"] as List?) ?? [];
     final nextSteps = (_result!["next_steps"] as List?) ?? [];
     final report = _result!["claim_report"] as Map? ?? {};
     final damage = _result!["damage_summary"] as String? ?? "";
-    final complete = _result!["checklist_complete"] as bool? ?? false;
     final completed = _result!["completed_items"] as int? ?? 0;
     final total = _result!["total_items"] as int? ?? 0;
 
@@ -497,7 +592,7 @@ class _InsuranceClaimScreenState extends State<InsuranceClaimScreen>
         padding: const EdgeInsets.all(20),
         child: Column(
           children: [
-            // Reference number
+            // ── Claim submitted banner — NO reference number ──────────────
             Container(
               padding: const EdgeInsets.all(16),
               decoration: AppTheme.accentCardDecoration,
@@ -509,36 +604,25 @@ class _InsuranceClaimScreenState extends State<InsuranceClaimScreen>
                       const Icon(
                         Icons.check_circle_rounded,
                         color: AppTheme.success,
-                        size: 20,
+                        size: 22,
                       ),
-                      const SizedBox(width: 8),
+                      const SizedBox(width: 10),
                       Text(
                         "Claim Report Generated",
-                        style: AppTheme.titleLarge.copyWith(fontSize: 16),
+                        style: AppTheme.titleLarge.copyWith(fontSize: 17),
                       ),
                     ],
                   ),
-                  const SizedBox(height: 10),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 8,
-                    ),
-                    decoration: BoxDecoration(
-                      color: AppTheme.bg,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(
-                        color: AppTheme.accent.withOpacity(0.4),
-                      ),
-                    ),
-                    child: Text(
-                      report["claim_reference"] as String? ?? "",
-                      style: AppTheme.plateNumber.copyWith(fontSize: 14),
-                    ),
-                  ),
-                  const SizedBox(height: 6),
+                  const SizedBox(height: 8),
                   Text(
-                    "${report['submitted_at'] ?? ''}  ·  ${report['insurance_status'] ?? ''}",
+                    "${report['submitted_at'] ?? ''}  ·  "
+                    "Insurance: ${report['insurance_status'] ?? 'Unknown'}",
+                    style: AppTheme.bodyMedium.copyWith(fontSize: 12),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    "${report['photos_submitted'] ?? 0} photo(s) submitted",
                     style: AppTheme.bodyMedium.copyWith(fontSize: 11),
                   ),
                 ],
@@ -547,7 +631,7 @@ class _InsuranceClaimScreenState extends State<InsuranceClaimScreen>
 
             const SizedBox(height: 14),
 
-            // Checklist
+            // ── Document checklist ────────────────────────────────────────
             _resultCard(
               title: "Document Checklist ($completed/$total)",
               icon: Icons.checklist_rounded,
@@ -605,7 +689,7 @@ class _InsuranceClaimScreenState extends State<InsuranceClaimScreen>
 
             const SizedBox(height: 12),
 
-            // Damage summary from AI
+            // ── AI Damage Assessment ──────────────────────────────────────
             if (damage.isNotEmpty)
               _resultCard(
                 title: "AI Damage Assessment",
@@ -622,7 +706,7 @@ class _InsuranceClaimScreenState extends State<InsuranceClaimScreen>
 
             const SizedBox(height: 12),
 
-            // Next steps
+            // ── Next Steps ────────────────────────────────────────────────
             _resultCard(
               title: "Next Steps",
               icon: Icons.linear_scale_rounded,
@@ -722,15 +806,62 @@ class _InsuranceClaimScreenState extends State<InsuranceClaimScreen>
 
             const SizedBox(height: 16),
 
+            // ── Download PDF button ───────────────────────────────────────
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: _isGeneratingPdf ? null : _downloadClaimReport,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppTheme.accent,
+                  foregroundColor: AppTheme.bg,
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  textStyle: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                icon: _isGeneratingPdf
+                    ? SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                          color: AppTheme.bg,
+                          strokeWidth: 2,
+                          value: _pdfProgress > 0 ? _pdfProgress : null,
+                        ),
+                      )
+                    : const Icon(Icons.download_rounded, size: 20),
+                label: Text(
+                  _isGeneratingPdf
+                      ? (_pdfProgress > 0
+                            ? "Generating... "
+                                  "${(_pdfProgress * 100).toInt()}%"
+                            : "Generating PDF...")
+                      : "Download Claim Report (PDF)",
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 10),
+
+            // ── Start New Claim ───────────────────────────────────────────
             SizedBox(
               width: double.infinity,
               child: OutlinedButton.icon(
-                onPressed: () => setState(() => _result = null),
+                onPressed: () => setState(() {
+                  _result = null;
+                  _accidentImages.clear();
+                  _descController.clear();
+                }),
                 style: AppTheme.outlineButton,
                 icon: const Icon(Icons.refresh_rounded, size: 18),
                 label: const Text("Start New Claim"),
               ),
             ),
+
             const SizedBox(height: 30),
           ],
         ),

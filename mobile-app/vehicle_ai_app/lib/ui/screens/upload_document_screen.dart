@@ -9,6 +9,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 
 import '../../services/notification_service.dart';
 import '../../theme/app_theme.dart';
+import '../../constants.dart';
 
 class UploadDocumentScreen extends StatefulWidget {
   /// null  → RC upload flow  → calls /process (single image only)
@@ -23,7 +24,7 @@ class UploadDocumentScreen extends StatefulWidget {
 }
 
 class _UploadDocumentScreenState extends State<UploadDocumentScreen> {
-  static const String baseUrl = "http://127.0.0.1:8000";
+  final String baseUrl = AppConstants.baseUrl;
   final ImagePicker _picker = ImagePicker();
 
   bool _isUploading = false;

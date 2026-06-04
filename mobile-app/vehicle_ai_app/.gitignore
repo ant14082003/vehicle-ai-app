@@ -46,6 +46,7 @@ app.*.map.json
 
 # Secrets
 .env
+.env.local
 backend/firebase_admin.json
 
 # Python
@@ -56,3 +57,15 @@ __pycache__/
 # Flutter
 build/
 .android/
+
+# Android signing
+android/key.properties
+android/upload-keystore.jks
+*.jks
+*.keystore
+
+# Flutter
+.dart_tool/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies

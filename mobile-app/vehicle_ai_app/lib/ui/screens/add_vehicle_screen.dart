@@ -4,6 +4,7 @@ import 'dart:convert';
 
 import '../../theme/app_theme.dart';
 import 'upload_document_screen.dart';
+import '../../constants.dart';
 
 class AddVehicleScreen extends StatefulWidget {
   const AddVehicleScreen({super.key});
@@ -14,7 +15,7 @@ class AddVehicleScreen extends StatefulWidget {
 
 class _AddVehicleScreenState extends State<AddVehicleScreen>
     with SingleTickerProviderStateMixin {
-  static const String baseUrl = "http://127.0.0.1:8000";
+  final String baseUrl = AppConstants.baseUrl;
 
   final TextEditingController _controller = TextEditingController();
   bool _isLoading = false;

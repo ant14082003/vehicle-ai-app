@@ -10,9 +10,36 @@ from io import BytesIO
 import re
 import fitz
 from groq import Groq
+import os
 import hashlib
 import base64
-import os
+import platform
+import pytesseract
+import shutil
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch, cm
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+from fastapi.responses import FileResponse
+import tempfile
+import os as _os
+
+print("CURRENT OS:", platform.system())
+
+if platform.system() == "Windows":
+    pytesseract.pytesseract.tesseract_cmd = (
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    )
+else:
+    tesseract_path = shutil.which("tesseract")
+    print("FOUND TESSERACT:", tesseract_path)
+
+    if tesseract_path:
+        pytesseract.pytesseract.tesseract_cmd = tesseract_path
+
+print("FINAL TESSERACT CMD:", pytesseract.pytesseract.tesseract_cmd)
 # ─────────────────────────────────────────────
 #  CONFIG
 # ─────────────────────────────────────────────
@@ -55,41 +82,61 @@ groq_client = Groq(api_key=GROQ_KEY)
 # ─────────────────────────────────────────────
 class RCUploadRequest(BaseModel):
     imageUrl: str
+    userId: str = ""
 
 class DocumentUploadRequest(BaseModel):
     imageUrls: list[str]
     vehicleNumber: str
     docType: str
+    userId: str = ""
 
 class ManualVehicleRequest(BaseModel):
     vehicle_number: str
+    userId: str = ""
 
 class ServiceBillRequest(BaseModel):
     imageUrl: str
     vehicleNumber: str
+    userId: str = ""
 
 class ManualUploadRequest(BaseModel):
     imageUrl: str
     vehicleNumber: str
+    userId: str = ""
 
 class ChatRequest(BaseModel):
     vehicleNumber: str
     question: str
     targetVehicleNumber: Optional[str] = None
-
+    userId: str = ""
 class DamageDetectionRequest(BaseModel):
     imageUrl: str
     vehicleNumber: str
+    userId: str = ""
 
 class MaintenanceRequest(BaseModel):
     vehicleNumber: str
     currentMileage: Optional[int] = None
+    userId: str = ""
 
 class InsuranceClaimRequest(BaseModel):
     vehicleNumber: str
     accidentDescription: str
     imageUrls: list[str]
     documentUrls: Optional[list[str]] = []
+    userId: str = ""
+
+class ClaimReportRequest(BaseModel):
+    vehicleNumber: str
+    accidentDescription: str
+    claimReference: str
+    damageSummary: Optional[str] = ""
+    checklist: Optional[list] = []
+    ownerName: Optional[str] = ""
+    insuranceStatus: Optional[str] = ""
+    photosSubmitted: Optional[int] = 0
+    submittedAt: Optional[str] = ""
+    userId: str = ""
 
 
 # ─────────────────────────────────────────────
@@ -141,220 +188,629 @@ def image_url_to_base64(url: str) -> tuple[str, str]:
     b64 = base64.b64encode(response.content).decode("utf-8")
     return b64, media_type
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  RC FIELD EXTRACTION
+#  Handles all known Indian RC formats
+# ─────────────────────────────────────────────────────────────────────────────
 
-# ─────────────────────────────────────────────
-#  RC Field Extraction
-# ─────────────────────────────────────────────
-def extract_rc_fields(ocr_text: str) -> dict:
-    text  = ocr_text.upper()
-    lines = text.split('\n')
+def _clean_rc_value(raw: str, stop_at_next_field: bool = True) -> str:
+    """
+    Clean extracted value — remove noise, stop at next field label.
+    Handles OCR artifacts like ~, |, #, etc.
+    """
+    if not raw:
+        return ""
 
-    def clean_value(raw: str) -> str:
-        if not raw:
-            return ""
+    # Stop at known field labels that appear inline (two-column layout)
+    if stop_at_next_field:
         stop_patterns = [
-            r'\bO\.?\s*SL\.?\s*NO\b', r'\bMFR\b', r'\bMAKER\b',
-            r'\bCLASS\b', r'\bCOLOU?R\b', r'\bCC\b', r'\bCYL\b',
-            r'\bBODY\b', r'\bSEAT\b', r'\bUNLADEN\b', r'\bWHEEL\b',
-            r'\bSTDG\b', r'\bTAX\b', r'\bFORM\b', r'\bS/W/D\b',
-            r'\bADDRESS\b', r'\s{3,}',
+            r'\bO\.?\s*SL\.?\s*NO\b',
+            r'\bMFR\b', r'\bMAKER\b', r'\bMANUFACTURER\b',
+            r'\bCLASS\b', r'\bVEHICLE\s*CLASS\b',
+            r'\bCOLOU?R\b', r'\bCOLOR\b',
+            r'\bCC\b', r'\bCYL\b', r'\bCYLINDER\b',
+            r'\bBODY\b', r'\bSEAT\b', r'\bSEATING\b',
+            r'\bUNLADEN\b', r'\bWHEEL\b', r'\bWHEELBASE\b',
+            r'\bSTDG\b', r'\bTAX\b', r'\bFORM\b',
+            r'\bSEE\s*RULE\b', r'\bS/W/D\b',
+            r'\bADDRESS\b', r'\bSON/DAUGHTER\b',
+            r'\bHORSE\s*POWER\b', r'\bBHP\b',
+            r'\bREGISTRATION\s*AUTHORITY\b',
+            r'\bCARD\s*ISSUE\b',
+            r'\s{3,}',   # 3+ spaces = column separator
         ]
         earliest = len(raw)
         for pat in stop_patterns:
-            m = re.search(pat, raw)
+            m = re.search(pat, raw, re.IGNORECASE)
             if m and m.start() < earliest:
                 earliest = m.start()
-        result = raw[:earliest].strip()
-        result = re.sub(r'[~\*\#\$\|\^]+', '', result).strip()
-        return result.strip('.,;:/-').strip()
+        raw = raw[:earliest]
 
-    def find_field(*patterns) -> str:
-        for pattern in patterns:
-            m = re.search(pattern + r'\s*[:\-\.=~]+\s*([^\n]+)', text, re.IGNORECASE)
-            if m:
-                val = clean_value(m.group(1).strip())
-                if val and len(val) > 1:
-                    return val
-        return ""
+    # Remove OCR noise characters
+    raw = re.sub(r'[~\*\#\$\|\^\\]+', '', raw)
+    # Remove leading/trailing punctuation and whitespace
+    raw = raw.strip().strip('.,;:/-').strip()
+    # Collapse internal whitespace
+    raw = re.sub(r'\s+', ' ', raw)
+    return raw
 
-    vehicle_number = ""
-    for pat in [
-        r'REG\s*(?:NO|NUMBER|NUM|\.NO)\s*[:\-\.]\s*([A-Z]{2}[\s\-]?\d{2}[\s\-]?[A-Z]{1,3}[\s\-]?\d{3,4})',
-    ]:
+
+def _find_value(text: str, *label_patterns: str,
+                multiline: bool = False) -> str:
+    """
+    Find a field value in OCR text using multiple label pattern variations.
+    Handles:
+    - LABEL : VALUE (standard)
+    - LABEL\nVALUE (value on next line — smart card format)
+    - LABEL VALUE (no separator)
+    """
+    for pattern in label_patterns:
+        # Pattern 1: LABEL [optional whitespace] [:.-=] [whitespace] VALUE
+        m = re.search(
+            pattern + r'\s*[:\-\.=~]+\s*(.+)',
+            text, re.IGNORECASE | (re.MULTILINE if multiline else 0)
+        )
+        if m:
+            val = _clean_rc_value(m.group(1).strip())
+            if val and len(val) > 0:
+                return val
+
+        # Pattern 2: LABEL on one line, VALUE on the next line (smart card)
+        m = re.search(
+            pattern + r'\s*\n\s*(.+)',
+            text, re.IGNORECASE
+        )
+        if m:
+            val = _clean_rc_value(m.group(1).strip(), stop_at_next_field=False)
+            # Make sure it's not another label
+            if val and len(val) > 1 and not re.match(
+                    r'^(regn|chassis|engine|owner|maker|model|fuel|color|class|date|validity)',
+                    val, re.IGNORECASE):
+                return val
+
+    return ""
+
+
+def _extract_vehicle_number_all_formats(text: str) -> str:
+    """
+    Extract vehicle registration number from any RC format.
+    Handles all known patterns across RC types.
+    """
+    # Indian vehicle number pattern — flexible
+    VN_PATTERN = re.compile(
+        r'\b([A-Z]{2}[\s\-]?\d{2}[\s\-]?[A-Z]{1,3}[\s\-]?\d{3,4})\b',
+        re.IGNORECASE
+    )
+
+    # Priority patterns — most specific first
+    priority_patterns = [
+        # Format: "REG NO : KA04JN6024"
+        r'REG\s*(?:NO|NUMBER|NUM|\.?\s*NO\.?)\s*[:\-\.]\s*([A-Z]{2}[\s\-]?\d{2}[\s\-]?[A-Z]{1,3}[\s\-]?\d{3,4})',
+        # Format: "Regn No\nKA03KK7727" or "Regn. Number\nKA03KK7727"
+        r'REGN?\.?\s*(?:NO\.?|NUMBER)?\s*\n\s*([A-Z]{2}[\s\-]?\d{2}[\s\-]?[A-Z]{1,3}[\s\-]?\d{3,4})',
+        # Format: "Regn. Number KA03KK7727"
+        r'REGN?\.?\s*(?:NO\.?|NUMBER)?\s*[:\-]?\s*([A-Z]{2}[\s\-]?\d{2}[\s\-]?[A-Z]{1,3}[\s\-]?\d{3,4})',
+        # DigiLocker format: RC_REGN_NO
+        r'RC_REGN_NO\s*[:\-=]\s*([A-Z]{2}[\s\-]?\d{2}[\s\-]?[A-Z]{1,3}[\s\-]?\d{3,4})',
+    ]
+
+    for pat in priority_patterns:
         m = re.search(pat, text, re.IGNORECASE)
         if m:
-            vehicle_number = re.sub(r'[\s\-]', '', m.group(1)).upper()
-            break
-    if not vehicle_number:
-        for line in lines:
-            m = re.search(r'\b([A-Z]{2}\d{2}[A-Z]{1,3}\d{3,4})\b', line)
-            if m:
-                vehicle_number = m.group(1)
-                break
+            vn = re.sub(r'[\s\-]', '', m.group(1)).upper()
+            if 8 <= len(vn) <= 11:
+                return vn
 
-    owner = ""
+    # Fallback: scan every line for vehicle number pattern
+    for line in text.split('\n'):
+        m = VN_PATTERN.search(line)
+        if m:
+            vn = re.sub(r'[\s\-]', '', m.group(1)).upper()
+            if 8 <= len(vn) <= 11:
+                return vn
 
-    for line in lines:
-        l = line.strip().upper()
+    return ""
 
-        if "OWNERNAME" in l or "OWNER NAME" in l:
-            parts = re.split(r'[:\-]', l, maxsplit=1)
 
-            if len(parts) > 1:
-                owner = parts[1].strip()
-                break
+def _extract_engine_number(text: str) -> str:
+    """
+    Extract engine number — handles all known label variations:
+    - ENGINE.NO (Form 23A)
+    - Engine/Motor No (Smart Card)
+    - Engine No. (booklet)
+    - RC_ENG_NO (DigiLocker)
+    - ENG NO, MOTOR NO
+    Engine numbers are alphanumeric, typically 8-17 characters.
+    """
+    patterns = [
+        # "ENGINE/MOTOR NO" or "Engine/Motor No" — smart card format
+        r'ENGINE\s*/\s*MOTOR\s*NO\.?\s*[:\-\n]\s*([A-Z0-9]{6,17})',
+        # "ENGINE.NO" — Form 23A
+        r'ENGINE\.?\s*NO\.?\s*[:\-\.~=]+\s*([A-Z0-9]{6,17})',
+        # "Engine No." — booklet
+        r'ENGINE\s*NO\.?\s*[:\-\.]\s*([A-Z0-9]{6,17})',
+        # "ENG NO" abbreviation
+        r'ENG\.?\s*NO\.?\s*[:\-\.]\s*([A-Z0-9]{6,17})',
+        # "MOTOR NO"
+        r'MOTOR\s*NO\.?\s*[:\-\.]\s*([A-Z0-9]{6,17})',
+        # DigiLocker
+        r'RC_ENG_NO\s*[:\-=]\s*([A-Z0-9]{6,17})',
+        # Multiline — label then value on next line
+        r'ENGINE\s*/?\s*MOTOR\s*NO\.?\s*\n\s*([A-Z0-9]{6,17})',
+        r'ENGINE\.?\s*NO\.?\s*\n\s*([A-Z0-9]{6,17})',
+    ]
 
-    # Clean unwanted parts
-    if owner:
-        owner = re.split(r'S/?W/?D|SON|WIFE|DAUGHTER', owner)[0].strip()
-        owner = re.sub(r'[^A-Z\s]', '', owner).strip()
+    text_upper = text.upper()
+    for pat in patterns:
+        m = re.search(pat, text_upper)
+        if m:
+            val = m.group(1).strip()
+            # Validate: must be alphanumeric, 6-17 chars
+            if re.match(r'^[A-Z0-9]{6,17}$', val):
+                return val
 
-    model = find_field(r'MODEL', r'VEH\s*MODEL')
-    model = re.sub(r'[()]', '', model).strip()
+    return ""
 
-    maker = ""
-    mfr_m = re.search(r'\bMFR\s*[:\-\.]\s*([A-Z]+)', text)
-    if mfr_m:
-        maker = mfr_m.group(1).strip()
-    if not maker:
-        maker = find_field(r'MAKER', r'MANUFACTURER')
 
-    fuel = find_field(r'FUEL\s*TYPE', r'\bFUEL\b')
-    if fuel:
-        fuel = fuel.split()[0]
+def _extract_chassis_number(text: str) -> str:
+    """
+    Extract chassis number — handles all formats.
+    Indian chassis numbers are typically 17-char VIN or shorter.
+    Labels: CHASSIS.NO, Chassis No, Chasis No (one s), RC_CHASI_NO
+    """
+    patterns = [
+        # "CHASSIS.NO" — Form 23A
+        r'CHASSIS\.?\s*NO\.?\s*[:\-\.~=]+\s*([A-Z0-9]{8,17})',
+        # "Chassis No" — Smart Card
+        r'CHASSIS\s*NO\.?\s*[:\-\.]\s*([A-Z0-9]{8,17})',
+        # "Chasis No" — common misspelling/variant
+        r'CHASIS\s*NO\.?\s*[:\-\.]\s*([A-Z0-9]{8,17})',
+        # DigiLocker
+        r'RC_CHASI_NO\s*[:\-=]\s*([A-Z0-9]{8,17})',
+        r'RC_CHASSIS_NO\s*[:\-=]\s*([A-Z0-9]{8,17})',
+        # Multiline
+        r'CHASSIS\.?\s*NO\.?\s*\n\s*([A-Z0-9]{8,17})',
+        r'CHASIS\s*NO\.?\s*\n\s*([A-Z0-9]{8,17})',
+    ]
 
-    color = ""
-    col_m = re.search(r'COLOU?R\s*[:\-\.]\s*([A-Z]+(?:\s+[A-Z]+)?)', text)
-    if col_m:
-        color = clean_value(col_m.group(1))
-    if not color:
-        color = find_field(r'COLOU?R', r'COLOR')
+    text_upper = text.upper()
+    for pat in patterns:
+        m = re.search(pat, text_upper)
+        if m:
+            val = m.group(1).strip()
+            if re.match(r'^[A-Z0-9]{8,17}$', val):
+                return val
 
-    vehicle_class = ""
-    cls_m = re.search(r'\bCLASS\s*[:\-\.]\s*([A-Z/\-]+(?:\s+[A-Z/\-]+)?)', text)
-    if cls_m:
-        vehicle_class = clean_value(cls_m.group(1))
-    class_map = {"MCYCLE": "Motorcycle", "M-CYCLE": "Motorcycle",
-                 "M/CYCLE": "Motorcycle", "SCOOTER": "Scooter"}
-    vehicle_class = class_map.get(vehicle_class.upper().strip(), vehicle_class)
+    return ""
 
-    reg_date = ""
-    rd_m = re.search(r'REG\.?\s*DATE\s*[:\-\.]\s*(\d{2}/\d{2}/\d{4})', text)
-    if rd_m:
-        reg_date = rd_m.group(1)
 
-    fitness_upto = ""
-    fu_m = re.search(r'REG/?FC\s*UPTO\s*[:\-\.]\s*(\d{2}/\d{2}/\d{4})', text)
-    if fu_m:
-        fitness_upto = fu_m.group(1)
+def _extract_owner_name(text: str) -> str:
+    """
+    Extract owner name — handles:
+    - OWNERNAME (Form 23A — no space)
+    - Owner Name (Smart Card)
+    - Name of Owner (booklet)
+    - RC_OWNER_NAME (DigiLocker)
+    Removes S/W/D OF continuation.
+    """
+    patterns = [
+        r'OWNER\s*NAME\s*[:\-\.~=]+\s*([^\n]+)',
+        r'OWNERNAME\s*[:\-\.~=]+\s*([^\n]+)',
+        r'NAME\s*OF\s*(?:OWNER|REGISTERED\s*OWNER)\s*[:\-\.]\s*([^\n]+)',
+        r'RC_OWNER_NAME\s*[:\-=]\s*([^\n]+)',
+        r'REGISTERED\s*OWNER\s*[:\-\.]\s*([^\n]+)',
+        # Smart card — "Owner Name\nAMIT ANVERI"
+        r'OWNER\s*NAME\s*\n\s*([A-Z][A-Z\s]{2,40})',
+    ]
 
-    engine_cc = ""
-    cc_m = re.search(r'\bCC\s*[:\-\.]\s*(\d+)', text)
-    if cc_m:
-        engine_cc = f"{cc_m.group(1)}cc"
+    text_upper = text.upper()
+    for pat in patterns:
+        m = re.search(pat, text_upper)
+        if m:
+            val = _clean_rc_value(m.group(1).strip())
+            # Remove S/W/D continuation
+            val = re.split(r'S/?W/?D|SON\b|WIFE\b|DAUGHTER\b|ADDRESS\b',
+                           val, flags=re.IGNORECASE)[0].strip()
+            # Clean and title-case
+            val = val.strip('.,;:/-').strip()
+            if val and 2 <= len(val) <= 60:
+                return val.title()
 
-    chassis = ""
-    ch_m = re.search(r'CHASSIS\.?\s*NO\s*[:\-\.]\s*([A-Z0-9]+)', text)
-    if ch_m:
-        chassis = ch_m.group(1).strip()
+    return ""
 
-   # ── Engine Number Extraction (Final Fix) ──────────────────────
-    engine_no = ""
 
-    normalized_text = text.replace("O", "0").replace("I", "1")
-    lines = normalized_text.split("\n")
+def _extract_maker(text: str) -> str:
+    """
+    Extract maker/manufacturer — handles:
+    - MFR : HONDA (Form 23A)
+    - Maker:\nROYAL-ENFIELD (UNIT OF EICHER LTD) (Smart Card)
+    - MANUFACTURER (booklet)
+    - RC_MAKER_DESC (DigiLocker)
+    """
+    text_upper = text.upper()
 
-    for line in lines:
-        l = line.strip().upper()
+    # Smart Card: "Maker:" followed by value (possibly on next line)
+    # Value may contain brackets: "ROYAL-ENFIELD (UNIT OF EICHER LTD)"
+    m = re.search(r'MAKER\s*[:\-\.~]?\s*\n?\s*([A-Z][A-Z0-9\s\-\(\)\.]{1,60})',
+                  text_upper)
+    if m:
+        val = _clean_rc_value(m.group(1))
+        # Extract just the main brand name, remove parenthetical subsidiary
+        val = re.sub(r'\s*\([^)]+\)\s*', '', val).strip()
+        if val and 2 <= len(val) <= 40:
+            return val.title()
 
-        if "ENGINE" in l or "ENG" in l:
-            print("ENGINE LINE FOUND:", l)
+    # MFR : HONDA
+    m = re.search(r'\bMFR\s*[:\-\.]\s*([A-Z][A-Z\s\-]{1,30})', text_upper)
+    if m:
+        val = _clean_rc_value(m.group(1))
+        if val:
+            return val.title()
 
-            candidates = re.findall(r'[A-Z0-9]{6,}', l)
+    # MANUFACTURER / MAKE
+    for pat in [
+        r'MANUFACTURER\s*[:\-\.]\s*([A-Z][A-Z\s\-]{1,30})',
+        r'\bMAKE\s*[:\-\.]\s*([A-Z][A-Z\s\-]{1,30})',
+        r'RC_MAKER_DESC\s*[:\-=]\s*([^\n]+)',
+    ]:
+        m = re.search(pat, text_upper)
+        if m:
+            val = _clean_rc_value(m.group(1))
+            if val:
+                return val.title()
 
-            for c in candidates:
-                # Skip obvious wrong matches
-                if c in ["ENG1NE", "ENGINE", "MCYCLE", "CLASS"]:
-                    continue
+    return ""
 
-                # Must contain BOTH letters and numbers (real engine numbers do)
-                if re.search(r'[A-Z]', c) and re.search(r'\d', c):
-                    engine_no = c
-                    break
 
-            if engine_no:
-                break
+def _extract_model(text: str) -> str:
+    """
+    Extract model — handles:
+    - MODEL : DIO (DX) (Form 23A)
+    - Model:\nHIMALAYAN (Smart Card)
+    - RC_VEH_DESC (DigiLocker)
+    """
+    text_upper = text.upper()
 
-    print("ENGINE NUMBER:", engine_no)
+    # Smart card: "Model:" on one line, value on next
+    m = re.search(r'\bMODEL\s*[:\-\.~]?\s*\n\s*([A-Z][A-Z0-9\s\-\(\)\.]{1,40})',
+                  text_upper)
+    if m:
+        val = _clean_rc_value(m.group(1), stop_at_next_field=False)
+        val = re.sub(r'[()]', '', val).strip()
+        if val and 1 <= len(val) <= 40:
+            return val.title()
 
-    mfg_date = find_field(r'MFG\.?\s*DATE', r'MANUFACTURING\s*DATE')
-    print("ENGINE LINE FOUND:", line)
-    print("ENGINE NUMBER:", engine_no)
-    # ── State from Vehicle Number (All India) ─────────────────────
-    state_map = {
-        "AN": "Andaman and Nicobar Islands",
-        "AP": "Andhra Pradesh",
-        "AR": "Arunachal Pradesh",
-        "AS": "Assam",
-        "BR": "Bihar",
-        "CG": "Chhattisgarh",
-        "CH": "Chandigarh",
-        "DD": "Daman and Diu",
-        "DL": "Delhi",
-        "DN": "Dadra and Nagar Haveli",
-        "GA": "Goa",
-        "GJ": "Gujarat",
-        "HP": "Himachal Pradesh",
-        "HR": "Haryana",
-        "JH": "Jharkhand",
-        "JK": "Jammu and Kashmir",
-        "KA": "Karnataka",
-        "KL": "Kerala",
-        "LA": "Ladakh",
-        "LD": "Lakshadweep",
-        "MH": "Maharashtra",
-        "ML": "Meghalaya",
-        "MN": "Manipur",
-        "MP": "Madhya Pradesh",
-        "MZ": "Mizoram",
-        "NL": "Nagaland",
-        "OD": "Odisha",
-        "PB": "Punjab",
-        "PY": "Puducherry",
-        "RJ": "Rajasthan",
-        "SK": "Sikkim",
-        "TN": "Tamil Nadu",
-        "TR": "Tripura",
-        "TS": "Telangana",
-        "UK": "Uttarakhand",
-        "UP": "Uttar Pradesh",
-        "WB": "West Bengal"
+    # Inline: "MODEL : DIO (DX)"
+    m = re.search(r'\bMODEL\s*[:\-\.~=]+\s*([^\n]+)', text_upper)
+    if m:
+        val = _clean_rc_value(m.group(1))
+        val = re.sub(r'[()]', '', val).strip()
+        if val:
+            return val.title()
+
+    for pat in [
+        r'VEH(?:ICLE)?\s*MODEL\s*[:\-\.]\s*([^\n]+)',
+        r'RC_VEH_DESC\s*[:\-=]\s*([^\n]+)',
+    ]:
+        m = re.search(pat, text_upper)
+        if m:
+            val = _clean_rc_value(m.group(1))
+            val = re.sub(r'[()]', '', val).strip()
+            if val:
+                return val.title()
+
+    return ""
+
+
+def _extract_color(text: str) -> str:
+    """
+    Extract colour — handles:
+    - COLOUR: GREY (Form 23A inline)
+    - Color:\nROCK RED (Smart Card next line)
+    - RC_COLOR (DigiLocker)
+    """
+    text_upper = text.upper()
+
+    # Smart card next-line format
+    m = re.search(r'COLO(?:U?R)\s*[:\-\.~]?\s*\n\s*([A-Z][A-Z\s]{1,30})',
+                  text_upper)
+    if m:
+        val = _clean_rc_value(m.group(1), stop_at_next_field=False).strip()
+        if val and 1 <= len(val) <= 30:
+            return val.title()
+
+    # Inline format
+    m = re.search(r'COLO(?:U?R)\s*[:\-\.~=]+\s*([A-Z][A-Z\s]{1,30})',
+                  text_upper)
+    if m:
+        val = _clean_rc_value(m.group(1))
+        if val:
+            return val.title()
+
+    for pat in [r'RC_COLOR\s*[:\-=]\s*([^\n]+)',
+                r'RC_COLOUR\s*[:\-=]\s*([^\n]+)']:
+        m = re.search(pat, text_upper)
+        if m:
+            val = _clean_rc_value(m.group(1))
+            if val:
+                return val.title()
+
+    return ""
+
+
+def _extract_vehicle_class(text: str) -> str:
+    """
+    Extract vehicle class — handles:
+    - CLASS : MCYCLE (Form 23A inline)
+    - Vehicle Class: M-CYCLE/SCOOTER (2WN) (Smart Card)
+    - RC_VEH_CLASS_DESC (DigiLocker)
+    """
+    # Normalisation map
+    CLASS_MAP = {
+        "MCYCLE": "Motorcycle", "M-CYCLE": "Motorcycle",
+        "M/CYCLE": "Motorcycle", "MOTORCYCLE": "Motorcycle",
+        "SCOOTER": "Scooter", "M-CYCLE/SCOOTER": "M-Cycle/Scooter",
+        "MCYCLE/SCOOTER": "M-Cycle/Scooter",
+        "M-CYCLE/SCOOTER (2WN)": "M-Cycle/Scooter",
+        "MOPED": "Moped", "E-CYCLE": "E-Cycle",
+        "LMV": "Light Motor Vehicle", "HMV": "Heavy Motor Vehicle",
     }
 
-    state = ""
+    text_upper = text.upper()
 
+    # Smart card: "Vehicle Class: M-CYCLE/SCOOTER (2WN)"
+    m = re.search(
+        r'VEHICLE\s*CLASS\s*[:\-\.~]?\s*\n?\s*([A-Z][A-Z0-9\s\-/\(\)]{1,40})',
+        text_upper)
+    if m:
+        val = _clean_rc_value(m.group(1), stop_at_next_field=False).strip()
+        # Remove parenthetical like (2WN)
+        val_clean = re.sub(r'\s*\([^)]+\)', '', val).strip()
+        return CLASS_MAP.get(val_clean, val_clean.title() if val_clean else "")
+
+    # Inline: "CLASS : MCYCLE"
+    m = re.search(r'\bCLASS\s*[:\-\.~=]+\s*([A-Z][A-Z0-9\s\-/]{1,30})',
+                  text_upper)
+    if m:
+        val = _clean_rc_value(m.group(1)).strip()
+        return CLASS_MAP.get(val.upper(), val.title())
+
+    for pat in [r'RC_VEH_CLASS_DESC\s*[:\-=]\s*([^\n]+)',
+                r'VEH(?:ICLE)?\s*CLASS\s*[:\-\.]\s*([^\n]+)']:
+        m = re.search(pat, text_upper)
+        if m:
+            val = _clean_rc_value(m.group(1)).strip()
+            val_clean = re.sub(r'\s*\([^)]+\)', '', val).strip()
+            return CLASS_MAP.get(val_clean.upper(), val_clean.title())
+
+    return ""
+
+
+def _extract_date(text: str, *label_patterns: str) -> str:
+    """
+    Extract a date field — returns DD/MM/YYYY.
+    Handles separators: / - . space
+    Handles formats: DD/MM/YYYY, DD-MM-YYYY, DD MM YYYY, MM-YYYY (mfg date)
+    """
+    DATE_RE = re.compile(
+        r'\b(\d{1,2})\s*[\-/\.]\s*(\d{1,2})\s*[\-/\.]\s*(\d{4})\b'
+        r'|'
+        r'\b(\d{4})\s*[\-/\.]\s*(\d{1,2})\s*[\-/\.]\s*(\d{1,2})\b'
+        r'|'
+        r'\b(\d{1,2})\s*[\-/\.]\s*(\d{4})\b',  # MM/YYYY for mfg date
+    )
+
+    for label_pat in label_patterns:
+        m = re.search(label_pat + r'\s*[:\-\.~=]?\s*([^\n]{4,15})',
+                      text, re.IGNORECASE)
+        if m:
+            candidate = m.group(1).strip()
+            dm = DATE_RE.search(candidate)
+            if dm:
+                groups = dm.groups()
+                if groups[0]:   # DD/MM/YYYY
+                    d, mo, y = groups[0], groups[1], groups[2]
+                    return f"{d.zfill(2)}/{mo.zfill(2)}/{y}"
+                elif groups[3]: # YYYY/MM/DD
+                    y, mo, d = groups[3], groups[4], groups[5]
+                    return f"{d.zfill(2)}/{mo.zfill(2)}/{y}"
+                elif groups[6]: # MM/YYYY
+                    mo, y = groups[6], groups[7]
+                    return f"01/{mo.zfill(2)}/{y}"
+
+    return ""
+
+
+def _extract_fuel(text: str) -> str:
+    text_upper = text.upper()
+    for pat in [
+        r'FUEL\s*TYPE\s*[:\-\.~=]+\s*([A-Z]+)',
+        r'\bFUEL\s*[:\-\.~=]+\s*([A-Z]+)',
+        r'RC_FUEL_DESC\s*[:\-=]\s*([^\n]+)',
+    ]:
+        m = re.search(pat, text_upper)
+        if m:
+            val = m.group(1).split()[0].strip()
+            fuel_map = {
+                "PETROL": "Petrol", "DIESEL": "Diesel",
+                "CNG": "CNG", "ELECTRIC": "Electric",
+                "HYBRID": "Hybrid", "LPG": "LPG",
+            }
+            return fuel_map.get(val.upper(), val.title())
+    return ""
+
+
+def _extract_engine_cc(text: str) -> str:
+    text_upper = text.upper()
+    # "CC : 109" or "Cubic Cap. / ... 410.94"
+    for pat in [
+        r'\bCC\s*[:\-\.]\s*(\d+(?:\.\d+)?)',
+        r'CUBIC\s*CAP(?:ACITY)?\s*[:\-\./]?\s*(\d+(?:\.\d+)?)',
+        r'ENGINE\s*CAPACITY\s*[:\-\.]\s*(\d+(?:\.\d+)?)',
+        r'DISPLACE?MENT\s*[:\-\.]\s*(\d+(?:\.\d+)?)',
+    ]:
+        m = re.search(pat, text_upper)
+        if m:
+            val = m.group(1).split('/')[0].strip()  # handle "410.94 / 23.96"
+            try:
+                cc = float(val)
+                if 50 <= cc <= 5000:
+                    return f"{int(cc)}cc"
+            except ValueError:
+                pass
+    return ""
+
+
+def _detect_rc_format(text: str) -> str:
+    """
+    Detect which RC format we're dealing with.
+    Returns: 'smart_card', 'form_23a', 'digilocker', 'booklet', 'unknown'
+    """
+    text_upper = text.upper()
+    if "INDIAN UNION VEHICLE REGISTRATION" in text_upper or \
+       "ENGINE/MOTOR NO" in text_upper or \
+       "DATE OF REGN" in text_upper:
+        return "smart_card"
+    if "REG NO :" in text_upper or "OWNERNAME" in text_upper or \
+       "ENGINE.NO" in text_upper or "REG/FC UPTO" in text_upper:
+        return "form_23a"
+    if "RC_REGN_NO" in text_upper or "RC_OWNER_NAME" in text_upper or \
+       "RC_ENG_NO" in text_upper:
+        return "digilocker"
+    if "REGN. NO." in text_upper or "CHASIS NO" in text_upper:
+        return "booklet"
+    return "unknown"
+
+
+def extract_rc_fields(ocr_text: str) -> dict:
+    """
+    Master RC extraction function.
+    Detects format and applies appropriate extraction strategy.
+    Handles all known Indian RC formats flawlessly.
+    """
+    text        = ocr_text
+    text_upper  = text.upper()
+    rc_format   = _detect_rc_format(text)
+    print(f"[RC Extract] Detected format: {rc_format}")
+
+    # ── Vehicle Number ────────────────────────────────────────────────────────
+    vehicle_number = _extract_vehicle_number_all_formats(text_upper)
+
+    # ── Engine Number ─────────────────────────────────────────────────────────
+    engine_number = _extract_engine_number(text)
+
+    # ── Chassis Number ────────────────────────────────────────────────────────
+    chassis_number = _extract_chassis_number(text)
+
+    # ── Owner Name ────────────────────────────────────────────────────────────
+    owner = _extract_owner_name(text)
+
+    # ── Maker ─────────────────────────────────────────────────────────────────
+    maker = _extract_maker(text)
+
+    # ── Model ─────────────────────────────────────────────────────────────────
+    model = _extract_model(text)
+
+    # ── Colour ────────────────────────────────────────────────────────────────
+    color = _extract_color(text)
+
+    # ── Vehicle Class ─────────────────────────────────────────────────────────
+    vehicle_class = _extract_vehicle_class(text)
+
+    # ── Fuel Type ─────────────────────────────────────────────────────────────
+    fuel_type = _extract_fuel(text)
+
+    # ── Engine CC ─────────────────────────────────────────────────────────────
+    engine_cc = _extract_engine_cc(text)
+
+    # ── Registration Date ─────────────────────────────────────────────────────
+    # Smart card: "Date of Regn." / Form 23A: "REG.DATE" / "REG. DATE"
+    registration_date = _extract_date(
+        text_upper,
+        r'DATE\s*OF\s*REG(?:N|ISTRATION)?\.?',
+        r'REG(?:N|ISTRATION)?\.?\s*DATE',
+        r'DATE\s*OF\s*REGISTRATION',
+        r'RC_REGN_DT',
+    )
+
+    # ── Fitness / Validity Upto ───────────────────────────────────────────────
+    # Smart card: "Regn. Validity" / Form 23A: "REG/FC UPTO"
+    fitness_upto = _extract_date(
+        text_upper,
+        r'REGN?\.?\s*VALIDITY',
+        r'REG(?:N|ISTRATION)?/?FC\s*UPTO',
+        r'FITNESS\s*UPTO',
+        r'VALID(?:ITY)?\s*(?:UPTO|TILL|DATE)',
+        r'RC_FIT_UPTO',
+        r'VALID\s*UP\s*TO',
+    )
+
+    # ── Manufacturing Date ────────────────────────────────────────────────────
+    mfg_date = _extract_date(
+        text_upper,
+        r'MFG\.?\s*DATE',
+        r'MANUFACTURING\s*DATE',
+        r'MONTH[\s\-]*YEAR\s*OF\s*MFG\.?',
+        r'YEAR\s*OF\s*MFG\.?',
+        r'MFG\.?\s*YEAR',
+        r'RC_MFG_MONTH_YR',
+    )
+    # Smart card format: "Month-Year of Mfg.\n03-2022"
+    if not mfg_date:
+        m = re.search(
+            r'MONTH[\s\-]*YEAR\s*OF\s*MFG\.?\s*\n\s*(\d{2}[\-/]\d{4})',
+            text_upper
+        )
+        if m:
+            parts = re.split(r'[\-/]', m.group(1))
+            if len(parts) == 2:
+                mfg_date = f"01/{parts[0].zfill(2)}/{parts[1]}"
+
+    # ── Card Issue Date (Smart Card specific) ─────────────────────────────────
+    card_issue_date = ""
+    m = re.search(
+        r'CARD\s*ISSUE\s*DATE\s*[:\(\-]?\s*(\d{2}[\-/\.]\d{2}[\-/\.]\d{4})',
+        text_upper
+    )
+    if m:
+        raw_date = m.group(1)
+        parts    = re.split(r'[\-/\.]', raw_date)
+        if len(parts) == 3:
+            card_issue_date = f"{parts[0].zfill(2)}/{parts[1].zfill(2)}/{parts[2]}"
+
+    # ── State (from vehicle number prefix) ───────────────────────────────────
+    state = ""
     if vehicle_number and len(vehicle_number) >= 2:
-        state_code = vehicle_number[:2]
-        state = state_map.get(state_code, "")
-    return {
+        state = STATE_NAME_MAP.get(vehicle_number[:2].upper(), "")
+
+    # ── Build result ──────────────────────────────────────────────────────────
+    result = {
         "vehicle_number":    vehicle_number,
-        "owner":             owner.title() if owner else "",
-        "model":             model.title() if model else "",
-        "maker":             maker.title() if maker else "",
-        "fuel_type":         fuel.title() if fuel else "",
-        "color":             color.title() if color else "",
+        "owner":             owner,
+        "maker":             maker,
+        "model":             model,
+        "fuel_type":         fuel_type,
+        "color":             color,
         "vehicle_class":     vehicle_class,
-        "registration_date": reg_date,
+        "registration_date": registration_date,
         "fitness_upto":      fitness_upto,
         "engine_cc":         engine_cc,
-        "chassis_number":    chassis,
-        "engine_number":     engine_no,
+        "chassis_number":    chassis_number,
+        "engine_number":     engine_number,
         "mfg_date":          mfg_date,
+        "card_issue_date":   card_issue_date,
+        "rc_format":         rc_format,
         "insurance_upto":    "",
         "pucc_upto":         "",
         "state":             state,
     }
 
+    print(f"[RC Extract] Format: {rc_format} | Vehicle: {vehicle_number}")
+    for k, v in result.items():
+        if v and k not in ("rc_format", "insurance_upto", "pucc_upto"):
+            print(f"  {k}: {v}")
+
+    return result
 
 # ─────────────────────────────────────────────
 #  Vehicle Number Helpers
@@ -660,36 +1116,203 @@ def fetch_vehicle_image(maker: str, model: str) -> Optional[str]:
 # ─────────────────────────────────────────────
 #  Manual Loading
 # ─────────────────────────────────────────────
-def load_manual_for_vehicle(vehicle_number: str, model_name: str,
+# ─────────────────────────────────────────────────────────────────────────────
+#  REAL VEHICLE MANUAL URLS
+#  Add your Firebase Storage URLs here after uploading the PDFs.
+#  Key = lowercase model name (must match what comes from the API/RC)
+#  Value = Firebase Storage download URL
+# ─────────────────────────────────────────────────────────────────────────────
+REAL_MANUAL_URLS = {
+    # Honda
+    "honda dio":                 "https://firebasestorage.googleapis.com/v0/b/vehicle-doc-intelligence.firebasestorage.app/o/manuals%2Fhonda-dio.pdf?alt=media&token=9bdf2cb0-463f-4354-b2cd-c3e4aae41432",
+    "honda activa 6g":           "YOUR_FIREBASE_URL_FOR_honda-activa-6g.pdf",
+    "honda activa 5g":           "YOUR_FIREBASE_URL_FOR_honda-activa-5g.pdf",
+    "honda cb shine":            "YOUR_FIREBASE_URL_FOR_honda-cb-shine.pdf",
+    "honda unicorn 160":         "YOUR_FIREBASE_URL_FOR_honda-unicorn.pdf",
+    "honda hornet 2.0":          "YOUR_FIREBASE_URL_FOR_honda-hornet.pdf",
+    # Bajaj
+    "bajaj pulsar 150":          "YOUR_FIREBASE_URL_FOR_bajaj-pulsar-150.pdf",
+    "bajaj pulsar ns200":        "YOUR_FIREBASE_URL_FOR_bajaj-pulsar-ns200.pdf",
+    "bajaj dominar 400":         "YOUR_FIREBASE_URL_FOR_bajaj-dominar-400.pdf",
+    # Royal Enfield
+    "royal enfield classic 350": "YOUR_FIREBASE_URL_FOR_re-classic-350.pdf",
+    "royal enfield himalayan":   "YOUR_FIREBASE_URL_FOR_re-himalayan.pdf",
+    "royal enfield meteor 350":  "YOUR_FIREBASE_URL_FOR_re-meteor-350.pdf",
+    # TVS
+    "tvs apache rtr 160":        "YOUR_FIREBASE_URL_FOR_tvs-apache-160.pdf",
+    "tvs jupiter":               "YOUR_FIREBASE_URL_FOR_tvs-jupiter.pdf",
+    "tvs ntorq 125":             "YOUR_FIREBASE_URL_FOR_tvs-ntorq.pdf",
+    # Yamaha
+    "yamaha r15 v4":             "YOUR_FIREBASE_URL_FOR_yamaha-r15.pdf",
+    "yamaha fz-s v3":            "YOUR_FIREBASE_URL_FOR_yamaha-fz.pdf",
+    # Hero
+    "hero splendor plus":        "YOUR_FIREBASE_URL_FOR_hero-splendor.pdf",
+    "hero glamour":              "YOUR_FIREBASE_URL_FOR_hero-glamour.pdf",
+    # KTM
+    "ktm duke 200":              "YOUR_FIREBASE_URL_FOR_ktm-duke-200.pdf",
+    "ktm duke 390":              "YOUR_FIREBASE_URL_FOR_ktm-duke-390.pdf",
+    # Suzuki
+    "suzuki gixxer sf 250":      "YOUR_FIREBASE_URL_FOR_suzuki-gixxer.pdf",
+    "suzuki access 125":         "YOUR_FIREBASE_URL_FOR_suzuki-access.pdf",
+}
+
+
+def _get_manual_url(model_name: str) -> Optional[str]:
+    """
+    Find the PDF manual URL for a given model name.
+    Tries exact match first, then partial match.
+    """
+    if not model_name:
+        return None
+
+    model_lower = model_name.lower().strip()
+
+    # Exact match
+    if model_lower in REAL_MANUAL_URLS:
+        url = REAL_MANUAL_URLS[model_lower]
+        if "YOUR_FIREBASE_URL" not in url:
+            print(f"[Manual] Exact URL match: '{model_lower}'")
+            return url
+
+    # Partial match — "Honda Dio DX" matches "honda dio"
+    for key, url in REAL_MANUAL_URLS.items():
+        if "YOUR_FIREBASE_URL" in url:
+            continue
+        if key in model_lower or model_lower in key:
+            print(f"[Manual] Partial URL match: '{model_lower}' → '{key}'")
+            return url
+
+    print(f"[Manual] No PDF URL found for '{model_lower}'")
+    return None
+
+
+def _extract_text_from_pdf_url(url: str) -> str:
+    """
+    Download a PDF from URL and extract all text using PyMuPDF.
+    Returns empty string if download or extraction fails.
+    """
+    try:
+        print(f"[Manual] Downloading PDF from: {url[:60]}...")
+        response = requests.get(url, timeout=30)
+
+        if response.status_code != 200:
+            print(f"[Manual] Download failed: HTTP {response.status_code}")
+            return ""
+
+        pdf  = fitz.open(stream=response.content, filetype="pdf")
+        text = ""
+        for page_num in range(len(pdf)):
+            page_text = pdf.load_page(page_num).get_text()
+            text += page_text
+
+        print(f"[Manual] Extracted {len(text)} characters from "
+              f"{pdf.page_count} pages")
+
+        if len(text) < 500:
+            print(f"[Manual] PDF appears to be image-based — "
+                  f"insufficient text extracted")
+            return ""
+
+        return text
+
+    except Exception as e:
+        print(f"[Manual] PDF extraction error: {e}")
+        return ""
+
+
+def load_manual_for_vehicle(vehicle_number: str,
+                             model_name: str,
                              rc_data: dict = None) -> bool:
+    """
+    Load manual for a vehicle. Priority order:
+    1. Already loaded — return immediately
+    2. Real PDF from Firebase Storage — best accuracy
+    3. AI generated — guaranteed fallback
+
+    The AI fallback means the chat ALWAYS works even without a PDF.
+    """
     if vehicle_number not in knowledge_base:
         knowledge_base[vehicle_number] = {"manual": [], "bills": []}
+
+    # Already loaded — skip
     if knowledge_base[vehicle_number]["manual"]:
+        print(f"[Manual] Already loaded for {vehicle_number}")
         return True
 
+    print(f"[Manual] Loading for: {model_name}")
+
+    # ── PRIORITY 1: Try real PDF manual ───────────────────────────────────────
+    pdf_url = _get_manual_url(model_name)
+    if pdf_url:
+        print(f"[Manual] Trying real PDF: {pdf_url[:60]}...")
+        pdf_text = _extract_text_from_pdf_url(pdf_url)
+
+        if pdf_text and len(pdf_text) > 500:
+            chunks = chunk_text(
+                pdf_text,
+                source_label=f"Owner Manual — {model_name} (Official PDF)"
+            )
+            knowledge_base[vehicle_number]["manual"] = chunks
+            print(f"[Manual] ✅ Loaded from real PDF: {len(chunks)} chunks")
+            return True
+        else:
+            print(f"[Manual] ⚠️ PDF extraction failed — "
+                  f"falling back to AI generation")
+
+    # ── PRIORITY 2: AI Generated manual ──────────────────────────────────────
+    print(f"[Manual] Generating AI manual for: {model_name}")
+    return _generate_manual_with_ai(vehicle_number, model_name, rc_data)
+
+
+def _generate_manual_with_ai(vehicle_number: str,
+                               model_name: str,
+                               rc_data: dict = None) -> bool:
+    """
+    Generate manual content using Groq AI.
+    Used as fallback when no real PDF is available.
+    """
     rc_context = ""
     if rc_data:
         parts = []
-        if rc_data.get("engine_cc"):  parts.append(f"engine: {rc_data['engine_cc']}")
-        if rc_data.get("fuel_type"):  parts.append(f"fuel: {rc_data['fuel_type']}")
+        if rc_data.get("engine_cc"):
+            parts.append(f"engine: {rc_data['engine_cc']}")
+        if rc_data.get("fuel_type"):
+            parts.append(f"fuel: {rc_data['fuel_type']}")
         if parts:
-            rc_context = f"\nKnown specs: {', '.join(parts)}."
+            rc_context = f" Known specs: {', '.join(parts)}."
 
     sections = [
         ("Engine & Technical Specifications",
-         f"Provide complete technical specifications for {model_name}.{rc_context} Include engine type, displacement, max power, max torque, starting system, ignition, carburetor/FI."),
+         f"Complete technical specs for {model_name}.{rc_context} "
+         f"Include: engine type, displacement, max power (bhp at rpm), "
+         f"max torque (Nm at rpm), ignition, transmission."),
+
         ("Maintenance Schedule",
-         f"Complete maintenance schedule for {model_name} with exact km intervals: engine oil, oil filter, air filter, spark plug, valve clearance, chain, brakes, tyres."),
+         f"Complete maintenance schedule for {model_name} with exact km "
+         f"and month intervals: engine oil, oil filter, air filter, "
+         f"spark plug, valve clearance, chain, brakes, tyres."),
+
         ("Engine Oil & Fluids",
-         f"For {model_name}: recommended oil grade, oil capacity, brake fluid type, fuel tank capacity, recommended octane."),
-        ("Tyre & Brakes",
-         f"For {model_name}: front/rear tyre sizes, tyre pressures in PSI (solo and pillion), brake types and sizes."),
+         f"Exact fluid specs for {model_name}: engine oil grade, "
+         f"oil capacity in litres, brake fluid type, fuel tank "
+         f"capacity, recommended octane."),
+
+        ("Tyre Specifications & Brakes",
+         f"Tyre and brake specs for {model_name}: front/rear tyre sizes, "
+         f"tyre pressures in PSI (solo and pillion), brake types."),
+
         ("Electrical System",
-         f"For {model_name}: battery spec, headlight wattage, main fuse rating, charging voltage."),
+         f"Electrical specs for {model_name}: battery voltage and Ah, "
+         f"headlight wattage, main fuse rating, charging voltage."),
+
         ("Common Problems & Troubleshooting",
-         f"Common issues for {model_name}: hard starting, rough idle, poor mileage, chain noise, brake issues, electrical faults with diagnosis and fix."),
+         f"Top 6 common problems for {model_name} with diagnosis and "
+         f"fixes: hard starting, rough idle, poor mileage, chain "
+         f"noise, brake issues, electrical faults."),
+
         ("Safety & Riding Guidelines",
-         f"Safety guidelines for {model_name}: break-in procedure, max load, pre-ride checklist, storage guidelines."),
+         f"Safety guidelines for {model_name}: break-in procedure, "
+         f"max load, pre-ride checklist, storage guidelines."),
     ]
 
     all_chunks = []
@@ -698,23 +1321,33 @@ def load_manual_for_vehicle(vehicle_number: str, model_name: str,
             response = groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=[
-                    {"role": "system", "content": "You are a certified motorcycle mechanic. Provide accurate, specific technical information."},
+                    {"role": "system", "content":
+                     "You are a certified motorcycle mechanic. "
+                     "Provide accurate, specific technical information. "
+                     "Use exact numbers. Never say you don't know."},
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=700, temperature=0.1,
+                max_tokens=700,
+                temperature=0.1,
             )
             content      = response.choices[0].message.content
             section_text = f"=== {section_title} ===\n{content}"
-            chunks       = chunk_text(section_text, source_label=f"Owner Manual — {section_title}")
+            chunks       = chunk_text(
+                section_text,
+                source_label=f"Owner Manual — {section_title} (AI Generated)"
+            )
             all_chunks.extend(chunks)
+            print(f"[Manual] ✓ AI: {section_title} ({len(chunks)} chunks)")
         except Exception as e:
-            print(f"[Manual] ✗ {section_title}: {e}")
+            print(f"[Manual] ✗ AI: {section_title}: {e}")
 
     if all_chunks:
         knowledge_base[vehicle_number]["manual"] = all_chunks
+        print(f"[Manual] Total: {len(all_chunks)} AI chunks for "
+              f"{vehicle_number}")
         return True
-    return False
 
+    return False
 
 # ─────────────────────────────────────────────
 #  Text Chunking + Retrieval
@@ -875,7 +1508,325 @@ def _build_vehicle_dict(vehicle_number: str, details: dict,
         "service_bills":     [],
         "damage_reports":    [],
     }
-
+ 
+def _generate_claim_pdf(data: dict) -> str:
+    """
+    Generates a professional insurance claim PDF report.
+    Returns the path to the generated PDF file.
+    """
+    tmp_dir  = tempfile.mkdtemp()
+    pdf_path = os.path.join(tmp_dir, f"claim_{data['claimReference']}.pdf")
+ 
+    doc = SimpleDocTemplate(
+        pdf_path,
+        pagesize=A4,
+        rightMargin=2*cm,
+        leftMargin=2*cm,
+        topMargin=2*cm,
+        bottomMargin=2*cm,
+    )
+ 
+    # ── Styles ─────────────────────────────────────────────────────────────────
+    styles = getSampleStyleSheet()
+ 
+    style_title = ParagraphStyle(
+        "ClaimTitle",
+        parent=styles["Title"],
+        fontSize=20,
+        textColor=colors.HexColor("#1A1A2E"),
+        spaceAfter=6,
+        alignment=TA_CENTER,
+        fontName="Helvetica-Bold",
+    )
+    style_subtitle = ParagraphStyle(
+        "ClaimSubtitle",
+        parent=styles["Normal"],
+        fontSize=11,
+        textColor=colors.HexColor("#555555"),
+        spaceAfter=4,
+        alignment=TA_CENTER,
+    )
+    style_section = ParagraphStyle(
+        "SectionHeader",
+        parent=styles["Heading2"],
+        fontSize=13,
+        textColor=colors.HexColor("#1A1A2E"),
+        spaceBefore=16,
+        spaceAfter=6,
+        fontName="Helvetica-Bold",
+        borderPad=4,
+    )
+    style_body = ParagraphStyle(
+        "BodyText",
+        parent=styles["Normal"],
+        fontSize=10,
+        textColor=colors.HexColor("#333333"),
+        spaceAfter=4,
+        leading=15,
+    )
+    style_label = ParagraphStyle(
+        "Label",
+        parent=styles["Normal"],
+        fontSize=10,
+        textColor=colors.HexColor("#666666"),
+        fontName="Helvetica-Bold",
+        spaceAfter=2,
+    )
+    style_ref = ParagraphStyle(
+        "Reference",
+        parent=styles["Normal"],
+        fontSize=12,
+        textColor=colors.HexColor("#E8B84B"),
+        fontName="Helvetica-Bold",
+        alignment=TA_CENTER,
+        spaceAfter=4,
+    )
+    style_footer = ParagraphStyle(
+        "Footer",
+        parent=styles["Normal"],
+        fontSize=8,
+        textColor=colors.HexColor("#999999"),
+        alignment=TA_CENTER,
+    )
+    style_disclaimer = ParagraphStyle(
+        "Disclaimer",
+        parent=styles["Normal"],
+        fontSize=9,
+        textColor=colors.HexColor("#888888"),
+        spaceAfter=4,
+        leading=13,
+        alignment=TA_LEFT,
+    )
+ 
+    # ── Content ────────────────────────────────────────────────────────────────
+    story = []
+ 
+    # Header
+    story.append(Paragraph("MOTOR VEHICLE INSURANCE CLAIM REPORT", style_title))
+    story.append(Paragraph("Generated by AutoVault — Vehicle Management System", style_subtitle))
+    story.append(Spacer(1, 0.1*inch))
+ 
+    # Reference number box
+    ref_table = Table(
+        [[Paragraph(f"Claim Reference: {data['claimReference']}", style_ref)]],
+        colWidths=[16*cm],
+    )
+    ref_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#1A1A2E")),
+        ("ROWBACKGROUNDS", (0, 0), (-1, -1), [colors.HexColor("#1A1A2E")]),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ("ROUNDEDCORNERS", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(ref_table)
+    story.append(Spacer(1, 0.15*inch))
+ 
+    # ── Section 1: Vehicle & Claim Details ────────────────────────────────────
+    story.append(Paragraph("1. VEHICLE &amp; CLAIM DETAILS", style_section))
+    story.append(HRFlowable(width="100%", thickness=1,
+                             color=colors.HexColor("#E8B84B"), spaceAfter=8))
+ 
+    vehicle_data = [
+        ["Vehicle Registration No.", data.get("vehicleNumber", "—")],
+        ["Owner Name",               data.get("ownerName", "—")],
+        ["Insurance Status",         data.get("insuranceStatus", "—")],
+        ["Date &amp; Time of Report", data.get("submittedAt", "—")],
+        ["Photographs Submitted",    str(data.get("photosSubmitted", 0))],
+    ]
+    vehicle_table = Table(vehicle_data, colWidths=[6*cm, 10*cm])
+    vehicle_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F5F5F5")),
+        ("TEXTCOLOR", (0, 0), (0, -1), colors.HexColor("#444444")),
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("ROWBACKGROUNDS", (0, 0), (-1, -1),
+         [colors.HexColor("#FAFAFA"), colors.white]),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#DDDDDD")),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    story.append(vehicle_table)
+ 
+    # ── Section 2: Accident Description ───────────────────────────────────────
+    story.append(Paragraph("2. ACCIDENT DESCRIPTION", style_section))
+    story.append(HRFlowable(width="100%", thickness=1,
+                             color=colors.HexColor("#E8B84B"), spaceAfter=8))
+    desc = data.get("accidentDescription", "No description provided.")
+    story.append(Paragraph(desc, style_body))
+ 
+    # ── Section 3: AI Damage Assessment ───────────────────────────────────────
+    damage = data.get("damageSummary", "").strip()
+    if damage:
+        story.append(Paragraph("3. AI DAMAGE ASSESSMENT", style_section))
+        story.append(HRFlowable(width="100%", thickness=1,
+                                 color=colors.HexColor("#E8B84B"), spaceAfter=8))
+        story.append(Paragraph(
+            "<i>The following damage assessment was generated by AI vision analysis "
+            "of the submitted accident photographs:</i>",
+            style_disclaimer,
+        ))
+        story.append(Spacer(1, 0.05*inch))
+ 
+        damage_box = Table(
+            [[Paragraph(damage, style_body)]],
+            colWidths=[16*cm],
+        )
+        damage_box.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FFF8E7")),
+            ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#E8B84B")),
+            ("TOPPADDING", (0, 0), (-1, -1), 10),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+            ("LEFTPADDING", (0, 0), (-1, -1), 10),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ]))
+        story.append(damage_box)
+ 
+    # ── Section 4: Document Checklist ─────────────────────────────────────────
+    checklist = data.get("checklist", [])
+    if checklist:
+        story.append(Paragraph(
+            "4. DOCUMENT CHECKLIST" if damage else "3. DOCUMENT CHECKLIST",
+            style_section,
+        ))
+        story.append(HRFlowable(width="100%", thickness=1,
+                                 color=colors.HexColor("#E8B84B"), spaceAfter=8))
+ 
+        table_data = [["Document", "Status", "Required", "Notes"]]
+        for item in checklist:
+            available = item.get("available", False)
+            required  = item.get("required", False)
+            status    = "✓ Available" if available else "✗ Missing"
+            req_text  = "Yes" if required else "No"
+            note      = item.get("note", "")
+            table_data.append([
+                item.get("item", ""),
+                status,
+                req_text,
+                note,
+            ])
+ 
+        check_table = Table(
+            table_data,
+            colWidths=[4.5*cm, 3.5*cm, 2.5*cm, 5.5*cm],
+        )
+ 
+        # Row colors based on availability
+        row_styles = [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1A1A2E")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#DDDDDD")),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]
+        for i, item in enumerate(checklist, start=1):
+            available = item.get("available", False)
+            required  = item.get("required", False)
+            if available:
+                bg = colors.HexColor("#F0FFF4")
+                tc = colors.HexColor("#276749")
+            elif required:
+                bg = colors.HexColor("#FFF5F5")
+                tc = colors.HexColor("#C53030")
+            else:
+                bg = colors.HexColor("#FFFFF0")
+                tc = colors.HexColor("#744210")
+            row_styles.append(("BACKGROUND", (0, i), (-1, i), bg))
+            row_styles.append(("TEXTCOLOR", (1, i), (1, i), tc))
+            row_styles.append(("FONTNAME", (1, i), (1, i), "Helvetica-Bold"))
+ 
+        check_table.setStyle(TableStyle(row_styles))
+        story.append(check_table)
+ 
+    # ── Section 5: Next Steps ──────────────────────────────────────────────────
+    next_sec_num = 5 if (damage and checklist) else (4 if (damage or checklist) else 3)
+    story.append(Paragraph(f"{next_sec_num}. RECOMMENDED NEXT STEPS", style_section))
+    story.append(HRFlowable(width="100%", thickness=1,
+                             color=colors.HexColor("#E8B84B"), spaceAfter=8))
+ 
+    steps = [
+        ("URGENT", "File an FIR",
+         "Visit nearest police station and file a First Information Report (FIR) within 24 hours of the accident. Obtain a copy of the FIR — it is mandatory for the insurance claim."),
+        ("URGENT", "Notify Your Insurance Company",
+         "Call your insurer helpline immediately. Most insurers require notification within 24-48 hours. Provide the claim reference number from this report."),
+        ("ACTION", "Vehicle Inspection",
+         "Take your vehicle to an authorised garage. The insurance company will send a surveyor to assess the damage. Do not carry out repairs before the surveyor's visit."),
+        ("ACTION", "Submit Documents",
+         "Submit to the insurer: RC, Insurance Policy, FIR copy, Driving Licence, Repair Estimate from garage, and this claim report."),
+        ("INFO", "Claim Settlement",
+         "After surveyor approval, the insurer will process your claim — either cashless at a network garage or reimbursement based on your policy type."),
+    ]
+ 
+    urgency_colors = {
+        "URGENT": colors.HexColor("#C53030"),
+        "ACTION": colors.HexColor("#744210"),
+        "INFO":   colors.HexColor("#276749"),
+    }
+    urgency_bg = {
+        "URGENT": colors.HexColor("#FFF5F5"),
+        "ACTION": colors.HexColor("#FFFFF0"),
+        "INFO":   colors.HexColor("#F0FFF4"),
+    }
+ 
+    steps_data = [["Priority", "Step", "Action Required"]]
+    for urgency, title, desc in steps:
+        steps_data.append([urgency, title, desc])
+ 
+    steps_table = Table(steps_data, colWidths=[2*cm, 4*cm, 10*cm])
+    steps_styles = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1A1A2E")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#DDDDDD")),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ]
+    for i, (urgency, _, _) in enumerate(steps, start=1):
+        bg = urgency_bg.get(urgency, colors.white)
+        tc = urgency_colors.get(urgency, colors.black)
+        steps_styles.append(("BACKGROUND", (0, i), (-1, i), bg))
+        steps_styles.append(("TEXTCOLOR", (0, i), (0, i), tc))
+        steps_styles.append(("FONTNAME", (0, i), (1, i), "Helvetica-Bold"))
+ 
+    steps_table.setStyle(TableStyle(steps_styles))
+    story.append(steps_table)
+ 
+    # ── Disclaimer ─────────────────────────────────────────────────────────────
+    story.append(Spacer(1, 0.3*inch))
+    story.append(HRFlowable(width="100%", thickness=0.5,
+                             color=colors.HexColor("#CCCCCC"), spaceAfter=8))
+    story.append(Paragraph(
+        "<b>IMPORTANT DISCLAIMER:</b> This report was generated automatically by the AutoVault "
+        "application. The AI damage assessment is based on computer vision analysis and is "
+        "provided for reference purposes only. It does not replace a professional insurance "
+        "surveyor's assessment. The final claim settlement is subject to your insurance policy "
+        "terms and conditions and the decision of your insurance company.",
+        style_disclaimer,
+    ))
+    story.append(Spacer(1, 0.1*inch))
+    story.append(Paragraph(
+        f"Report generated by AutoVault | {data.get('submittedAt', '')} | Ref: {data.get('claimReference', '')}",
+        style_footer,
+    ))
+ 
+    # Build PDF
+    doc.build(story)
+    return pdf_path
 
 # ─────────────────────────────────────────────
 #  FEATURE 1: DAMAGE DETECTION
@@ -1411,6 +2362,258 @@ def insurance_claim(data: InsuranceClaimRequest):
         import traceback; traceback.print_exc()
         return {"message": "Claim processing failed", "error": str(e)}
 
+def _generate_claim_pdf(data: dict) -> str:
+    """
+    Generates a professional A4 insurance claim PDF.
+    Returns path to the temporary PDF file.
+    """
+    tmp_dir  = tempfile.mkdtemp()
+    pdf_path = _os.path.join(
+        tmp_dir, f"claim_{data['claimReference']}.pdf")
+
+    doc = SimpleDocTemplate(
+        pdf_path, pagesize=A4,
+        rightMargin=2*cm, leftMargin=2*cm,
+        topMargin=2*cm,  bottomMargin=2*cm,
+    )
+
+    styles = getSampleStyleSheet()
+
+    style_title = ParagraphStyle("T", parent=styles["Title"],
+        fontSize=18, textColor=colors.HexColor("#1A1A2E"),
+        spaceAfter=4, alignment=TA_CENTER, fontName="Helvetica-Bold")
+
+    style_subtitle = ParagraphStyle("S", parent=styles["Normal"],
+        fontSize=10, textColor=colors.HexColor("#555555"),
+        spaceAfter=4, alignment=TA_CENTER)
+
+    style_section = ParagraphStyle("H", parent=styles["Heading2"],
+        fontSize=12, textColor=colors.HexColor("#1A1A2E"),
+        spaceBefore=14, spaceAfter=5, fontName="Helvetica-Bold")
+
+    style_body = ParagraphStyle("B", parent=styles["Normal"],
+        fontSize=10, textColor=colors.HexColor("#333333"),
+        spaceAfter=4, leading=15)
+
+    style_ref = ParagraphStyle("R", parent=styles["Normal"],
+        fontSize=13, textColor=colors.HexColor("#E8B84B"),
+        fontName="Helvetica-Bold", alignment=TA_CENTER, spaceAfter=4)
+
+    style_footer = ParagraphStyle("F", parent=styles["Normal"],
+        fontSize=8, textColor=colors.HexColor("#999999"),
+        alignment=TA_CENTER)
+
+    style_disclaimer = ParagraphStyle("D", parent=styles["Normal"],
+        fontSize=9, textColor=colors.HexColor("#888888"),
+        spaceAfter=4, leading=13)
+
+    story = []
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    story.append(Paragraph(
+        "MOTOR VEHICLE INSURANCE CLAIM REPORT", style_title))
+    story.append(Paragraph(
+        "Generated by AutoVault — Vehicle Management System", style_subtitle))
+    story.append(Spacer(1, 0.1*inch))
+
+    # Reference number box
+    ref_table = Table(
+        [[Paragraph(
+            f"Claim Reference: {data['claimReference']}", style_ref)]],
+        colWidths=[16*cm])
+    ref_table.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0), (-1,-1), colors.HexColor("#1A1A2E")),
+        ("ALIGN",         (0,0), (-1,-1), "CENTER"),
+        ("TOPPADDING",    (0,0), (-1,-1), 10),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 10),
+    ]))
+    story.append(ref_table)
+    story.append(Spacer(1, 0.15*inch))
+
+    # ── Section 1: Vehicle Details ─────────────────────────────────────────────
+    story.append(Paragraph("1. VEHICLE &amp; CLAIM DETAILS", style_section))
+    story.append(HRFlowable(width="100%", thickness=1,
+        color=colors.HexColor("#E8B84B"), spaceAfter=8))
+
+    v_data = [
+        ["Registration Number", data.get("vehicleNumber", "—")],
+        ["Owner Name",          data.get("ownerName",      "—")],
+        ["Insurance Status",    data.get("insuranceStatus","—")],
+        ["Report Date & Time",  data.get("submittedAt",    "—")],
+        ["Photos Submitted",    str(data.get("photosSubmitted", 0))],
+    ]
+    v_table = Table(v_data, colWidths=[6*cm, 10*cm])
+    v_table.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0), (0,-1), colors.HexColor("#F5F5F5")),
+        ("FONTNAME",      (0,0), (0,-1), "Helvetica-Bold"),
+        ("FONTSIZE",      (0,0), (-1,-1), 10),
+        ("ROWBACKGROUNDS",(0,0), (-1,-1),
+            [colors.HexColor("#FAFAFA"), colors.white]),
+        ("GRID",          (0,0), (-1,-1), 0.5, colors.HexColor("#DDDDDD")),
+        ("TOPPADDING",    (0,0), (-1,-1), 7),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 7),
+        ("LEFTPADDING",   (0,0), (-1,-1), 8),
+        ("RIGHTPADDING",  (0,0), (-1,-1), 8),
+        ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
+    ]))
+    story.append(v_table)
+
+    # ── Section 2: Accident Description ────────────────────────────────────────
+    story.append(Paragraph("2. ACCIDENT DESCRIPTION", style_section))
+    story.append(HRFlowable(width="100%", thickness=1,
+        color=colors.HexColor("#E8B84B"), spaceAfter=8))
+    story.append(Paragraph(
+        data.get("accidentDescription", "No description provided."),
+        style_body))
+
+    # ── Section 3: AI Damage Assessment ────────────────────────────────────────
+    damage = data.get("damageSummary", "").strip()
+    if damage:
+        story.append(Paragraph(
+            "3. AI DAMAGE ASSESSMENT", style_section))
+        story.append(HRFlowable(width="100%", thickness=1,
+            color=colors.HexColor("#E8B84B"), spaceAfter=8))
+        story.append(Paragraph(
+            "<i>AI vision analysis of submitted accident photographs:</i>",
+            style_disclaimer))
+        story.append(Spacer(1, 0.05*inch))
+        dmg_box = Table(
+            [[Paragraph(damage, style_body)]], colWidths=[16*cm])
+        dmg_box.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0), (-1,-1), colors.HexColor("#FFF8E7")),
+            ("BOX",           (0,0), (-1,-1), 1, colors.HexColor("#E8B84B")),
+            ("TOPPADDING",    (0,0), (-1,-1), 10),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 10),
+            ("LEFTPADDING",   (0,0), (-1,-1), 10),
+            ("RIGHTPADDING",  (0,0), (-1,-1), 10),
+        ]))
+        story.append(dmg_box)
+
+    # ── Section 4: Document Checklist ──────────────────────────────────────────
+    checklist = data.get("checklist", [])
+    sec_num = 4 if damage else 3
+    if checklist:
+        story.append(Paragraph(
+            f"{sec_num}. DOCUMENT CHECKLIST", style_section))
+        story.append(HRFlowable(width="100%", thickness=1,
+            color=colors.HexColor("#E8B84B"), spaceAfter=8))
+
+        tdata = [["Document", "Status", "Required", "Notes"]]
+        for item in checklist:
+            av  = item.get("available", False)
+            req = item.get("required",  False)
+            tdata.append([
+                item.get("item", ""),
+                "✓ Available" if av else "✗ Missing",
+                "Yes" if req else "No",
+                item.get("note", ""),
+            ])
+
+        ctable = Table(tdata,
+            colWidths=[4.5*cm, 3.5*cm, 2.5*cm, 5.5*cm])
+        cstyles = [
+            ("BACKGROUND",  (0,0), (-1,0), colors.HexColor("#1A1A2E")),
+            ("TEXTCOLOR",   (0,0), (-1,0), colors.white),
+            ("FONTNAME",    (0,0), (-1,0), "Helvetica-Bold"),
+            ("FONTSIZE",    (0,0), (-1,-1), 9),
+            ("GRID",        (0,0), (-1,-1), 0.5, colors.HexColor("#DDDDDD")),
+            ("TOPPADDING",  (0,0), (-1,-1), 6),
+            ("BOTTOMPADDING",(0,0),(-1,-1), 6),
+            ("LEFTPADDING", (0,0), (-1,-1), 8),
+            ("RIGHTPADDING",(0,0), (-1,-1), 8),
+            ("VALIGN",      (0,0), (-1,-1), "MIDDLE"),
+        ]
+        for i, item in enumerate(checklist, start=1):
+            av  = item.get("available", False)
+            req = item.get("required",  False)
+            if av:
+                bg = colors.HexColor("#F0FFF4")
+                tc = colors.HexColor("#276749")
+            elif req:
+                bg = colors.HexColor("#FFF5F5")
+                tc = colors.HexColor("#C53030")
+            else:
+                bg = colors.HexColor("#FFFFF0")
+                tc = colors.HexColor("#744210")
+            cstyles += [
+                ("BACKGROUND", (0,i), (-1,i), bg),
+                ("TEXTCOLOR",  (1,i), (1,i),  tc),
+                ("FONTNAME",   (1,i), (1,i),  "Helvetica-Bold"),
+            ]
+        ctable.setStyle(TableStyle(cstyles))
+        story.append(ctable)
+
+    # ── Section 5: Next Steps ───────────────────────────────────────────────────
+    next_num = sec_num + 1 if checklist else sec_num
+    story.append(Paragraph(
+        f"{next_num}. RECOMMENDED NEXT STEPS", style_section))
+    story.append(HRFlowable(width="100%", thickness=1,
+        color=colors.HexColor("#E8B84B"), spaceAfter=8))
+
+    steps = [
+        ("URGENT", "File an FIR",
+         "Visit the nearest police station within 24 hours. Obtain FIR copy — mandatory for claim."),
+        ("URGENT", "Notify Insurer",
+         "Call your insurance helpline immediately. Provide the claim reference from this report."),
+        ("ACTION", "Vehicle Inspection",
+         "Take vehicle to authorised garage. Do NOT repair before insurer surveyor visit."),
+        ("ACTION", "Submit Documents",
+         "Submit: RC, Insurance Policy, FIR copy, Driving Licence, Repair Estimate, this report."),
+        ("INFO",   "Claim Settlement",
+         "After surveyor approval — cashless at network garage or reimbursement per your policy."),
+    ]
+    urgency_colors_map = {
+        "URGENT": colors.HexColor("#C53030"),
+        "ACTION": colors.HexColor("#744210"),
+        "INFO":   colors.HexColor("#276749"),
+    }
+    urgency_bg_map = {
+        "URGENT": colors.HexColor("#FFF5F5"),
+        "ACTION": colors.HexColor("#FFFFF0"),
+        "INFO":   colors.HexColor("#F0FFF4"),
+    }
+    sdata = [["Priority", "Step", "What To Do"]]
+    for u, t, d in steps:
+        sdata.append([u, t, d])
+    stable = Table(sdata, colWidths=[2*cm, 4*cm, 10*cm])
+    sstyles = [
+        ("BACKGROUND",  (0,0), (-1,0), colors.HexColor("#1A1A2E")),
+        ("TEXTCOLOR",   (0,0), (-1,0), colors.white),
+        ("FONTNAME",    (0,0), (-1,0), "Helvetica-Bold"),
+        ("FONTSIZE",    (0,0), (-1,-1), 9),
+        ("GRID",        (0,0), (-1,-1), 0.5, colors.HexColor("#DDDDDD")),
+        ("TOPPADDING",  (0,0), (-1,-1), 8),
+        ("BOTTOMPADDING",(0,0),(-1,-1), 8),
+        ("LEFTPADDING", (0,0), (-1,-1), 6),
+        ("RIGHTPADDING",(0,0), (-1,-1), 6),
+        ("VALIGN",      (0,0), (-1,-1), "TOP"),
+    ]
+    for i, (u, _, _) in enumerate(steps, start=1):
+        sstyles += [
+            ("BACKGROUND", (0,i), (-1,i), urgency_bg_map[u]),
+            ("TEXTCOLOR",  (0,i), (0,i),  urgency_colors_map[u]),
+            ("FONTNAME",   (0,i), (1,i),  "Helvetica-Bold"),
+        ]
+    stable.setStyle(TableStyle(sstyles))
+    story.append(stable)
+
+    # ── Disclaimer & Footer ────────────────────────────────────────────────────
+    story.append(Spacer(1, 0.3*inch))
+    story.append(HRFlowable(width="100%", thickness=0.5,
+        color=colors.HexColor("#CCCCCC"), spaceAfter=8))
+    story.append(Paragraph(
+        "<b>DISCLAIMER:</b> This report was generated by AutoVault. "
+        "The AI damage assessment is for reference only and does not replace "
+        "a professional insurance surveyor's assessment. Final claim settlement "
+        "is subject to your policy terms and the insurer's decision.",
+        style_disclaimer))
+    story.append(Spacer(1, 0.1*inch))
+    story.append(Paragraph(
+        f"AutoVault  |  {data.get('submittedAt', '')}  |  {data.get('claimReference', '')}",
+        style_footer))
+
+    doc.build(story)
+    return pdf_path
 
 # ─────────────────────────────────────────────
 #  Existing Routes
@@ -1655,3 +2858,47 @@ def debug_manual(vehicle_number: str):
         "manual_loaded":   len(kb.get("manual", [])) > 0,
         "manual_sections": list({c["source"] for c in kb.get("manual", [])}),
     }
+
+@app.post("/insurance-claim/download-report")
+def download_claim_report(data: ClaimReportRequest):
+    """
+    Generates and returns a downloadable PDF insurance claim report.
+    Call this AFTER /insurance-claim to get the PDF version.
+    """
+    try:
+        target = _get_vehicle_context(
+            normalize_vehicle_number(data.vehicleNumber))
+
+        # Build data dict for PDF
+        pdf_data = {
+            "vehicleNumber":       data.vehicleNumber,
+            "ownerName":           target.get("owner", "") if target else "",
+            "insuranceStatus":     data.insuranceStatus or "Unknown",
+            "accidentDescription": data.accidentDescription,
+            "damageSummary":       data.damageSummary or "",
+            "checklist":           data.checklist or [],
+            "photosSubmitted":     data.photosSubmitted or 0,
+            "claimReference":      data.claimReference,
+            "submittedAt":         data.submittedAt or
+                                   datetime.now().strftime('%d/%m/%Y %H:%M'),
+        }
+
+        print(f"[PDF] Generating claim report for {data.vehicleNumber}...")
+        pdf_path = _generate_claim_pdf(pdf_data)
+        print(f"[PDF] Generated at: {pdf_path}")
+
+        filename = f"InsuranceClaim_{data.vehicleNumber}_{data.claimReference}.pdf"
+
+        return FileResponse(
+            path=pdf_path,
+            filename=filename,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"'
+            },
+        )
+
+    except Exception as e:
+        print(f"ERROR /insurance-claim/download-report: {e}")
+        import traceback; traceback.print_exc()
+        return {"message": "PDF generation failed", "error": str(e)}

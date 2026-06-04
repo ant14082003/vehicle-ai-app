@@ -7,6 +7,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
 
 import '../../theme/app_theme.dart';
+import '../../constants.dart';
 
 class DamageDetectionScreen extends StatefulWidget {
   final String vehicleNumber;
@@ -23,7 +24,7 @@ class DamageDetectionScreen extends StatefulWidget {
 
 class _DamageDetectionScreenState extends State<DamageDetectionScreen>
     with SingleTickerProviderStateMixin {
-  static const String baseUrl = "http://127.0.0.1:8000";
+  final String baseUrl = AppConstants.baseUrl;
   final ImagePicker _picker = ImagePicker();
 
   bool _isAnalysing = false;

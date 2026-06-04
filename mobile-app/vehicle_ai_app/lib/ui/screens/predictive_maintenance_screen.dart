@@ -3,6 +3,7 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 
 import '../../theme/app_theme.dart';
+import '../../constants.dart';
 
 class PredictiveMaintenanceScreen extends StatefulWidget {
   final String vehicleNumber;
@@ -21,7 +22,7 @@ class PredictiveMaintenanceScreen extends StatefulWidget {
 class _PredictiveMaintenanceScreenState
     extends State<PredictiveMaintenanceScreen>
     with SingleTickerProviderStateMixin {
-  static const String baseUrl = "http://127.0.0.1:8000";
+  final String baseUrl = AppConstants.baseUrl;
 
   bool _isLoading = false;
   Map<String, dynamic>? _data;

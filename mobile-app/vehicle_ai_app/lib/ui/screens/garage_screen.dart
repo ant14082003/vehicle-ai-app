@@ -8,6 +8,9 @@ import '../../theme/app_theme.dart';
 import 'add_vehicle_screen.dart';
 import 'vehicle_detail_screen.dart';
 import 'dashboard_screen.dart';
+import '../../constants.dart';
+import '../../services/auth_service.dart';
+import 'login_screen.dart';
 
 class GarageScreen extends StatefulWidget {
   const GarageScreen({super.key});
@@ -18,7 +21,7 @@ class GarageScreen extends StatefulWidget {
 
 class _GarageScreenState extends State<GarageScreen>
     with SingleTickerProviderStateMixin {
-  static const String baseUrl = "http://127.0.0.1:8000";
+  final String baseUrl = AppConstants.baseUrl;
 
   List<dynamic> vehicles = [];
   List<dynamic> expiryAlerts = [];
@@ -556,6 +559,54 @@ class _GarageScreenState extends State<GarageScreen>
                 icon: const Icon(Icons.refresh_rounded),
                 onPressed: _loadAll,
                 color: AppTheme.textSecondary,
+              ),
+              // In garage_screen.dart AppBar actions, add:
+              IconButton(
+                icon: const Icon(Icons.logout_rounded),
+                color: AppTheme.textSecondary,
+                onPressed: () async {
+                  final confirmed = await showDialog<bool>(
+                    context: context,
+                    builder: (_) => AlertDialog(
+                      backgroundColor: AppTheme.surface,
+                      title: const Text(
+                        "Sign Out",
+                        style: TextStyle(color: AppTheme.textPrimary),
+                      ),
+                      content: Text(
+                        "Are you sure you want to sign out?",
+                        style: AppTheme.bodyMedium,
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(context, false),
+                          child: Text(
+                            "Cancel",
+                            style: TextStyle(color: AppTheme.textSecondary),
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: () => Navigator.pop(context, true),
+                          child: const Text(
+                            "Sign Out",
+                            style: TextStyle(color: AppTheme.danger),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                  if (confirmed == true) {
+                    await AuthService.signOut();
+
+                    if (context.mounted) {
+                      Navigator.pushAndRemoveUntil(
+                        context,
+                        MaterialPageRoute(builder: (_) => const LoginScreen()),
+                        (route) => false,
+                      );
+                    }
+                  }
+                },
               ),
             ],
           ),

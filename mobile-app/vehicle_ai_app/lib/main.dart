@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 import 'firebase_options.dart';
 import 'services/notification_service.dart';
@@ -11,13 +13,13 @@ import 'ui/screens/login_screen.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Force portrait — better for vehicle cards
+  await dotenv.load(fileName: ".env");
+
   await SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
     DeviceOrientation.portraitDown,
   ]);
 
-  // Status bar: transparent overlay on dark background
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
       statusBarColor: Colors.transparent,
@@ -42,7 +44,30 @@ class VehicleAIApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       title: 'AutoVault',
       theme: AppTheme.theme,
-      home: GarageScreen(),
+      // StreamBuilder watches login state — auto navigates on login/logout
+      home: StreamBuilder<User?>(
+        stream: FirebaseAuth.instance.authStateChanges(),
+        builder: (context, snapshot) {
+          // Still loading
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Scaffold(
+              backgroundColor: AppTheme.bg,
+              body: Center(
+                child: CircularProgressIndicator(
+                  color: AppTheme.accent,
+                  strokeWidth: 2,
+                ),
+              ),
+            );
+          }
+          // User is logged in — show garage
+          if (snapshot.hasData && snapshot.data != null) {
+            return const GarageScreen();
+          }
+          // Not logged in — show login
+          return const LoginScreen();
+        },
+      ),
     );
   }
 }
