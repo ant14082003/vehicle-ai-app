@@ -60,18 +60,30 @@ class _ServiceBillScreenState extends State<ServiceBillScreen>
     setState(() => _isLoading = true);
     try {
       final res = await http.get(
-        Uri.parse("$baseUrl/vehicle/${widget.vehicleNumber}"),
+        Uri.parse(
+          "$baseUrl/vehicle/${widget.vehicleNumber}?userId=${AppConstants.userId}",
+        ),
       );
+      print("SERVICE BILL USER = ${AppConstants.userId}");
+      print(res.body);
       final data = jsonDecode(res.body);
+
+      if (!mounted) return;
+
       if (data is Map<String, dynamic>) {
         final bills = (data["service_bills"] as List?) ?? [];
         setState(() => _bills = bills.cast<Map>());
       }
-      _animController.forward(from: 0);
+
+      if (mounted) {
+        _animController.forward(from: 0);
+      }
     } catch (e) {
       _snack("Could not load bills: $e");
     } finally {
-      setState(() => _isLoading = false);
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
     }
   }
 
@@ -130,6 +142,7 @@ class _ServiceBillScreenState extends State<ServiceBillScreen>
         body: jsonEncode({
           "imageUrl": firebaseUrl,
           "vehicleNumber": widget.vehicleNumber,
+          "userId": AppConstants.userId,
         }),
       );
 

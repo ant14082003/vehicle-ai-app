@@ -109,18 +109,27 @@ class _UploadDocumentScreenState extends State<UploadDocumentScreen> {
   }
 
   Future<void> _sendRCToBackend(String url) async {
+    print("RC USER ID = ${AppConstants.userId}");
+
     final res = await http.post(
       Uri.parse("$baseUrl/process"),
       headers: {"Content-Type": "application/json"},
-      body: jsonEncode({"imageUrl": url}),
+      body: jsonEncode({"imageUrl": url, "userId": AppConstants.userId}),
     );
+
     final data = jsonDecode(res.body);
+
     if (!mounted) return;
+
     _showSnack(data["message"] ?? "Done");
+
     final isSuccess =
         (data["vehicle_saved"] == true ||
         (data["message"] as String? ?? "").toLowerCase().contains("created"));
-    if (isSuccess && mounted) Navigator.pop(context, true);
+
+    if (isSuccess && mounted) {
+      Navigator.pop(context, true);
+    }
   }
 
   // ── Insurance/PUC: upload all staged images and call /add-document ─────────
@@ -160,6 +169,7 @@ class _UploadDocumentScreenState extends State<UploadDocumentScreen> {
           "imageUrls": uploadedUrls,
           "vehicleNumber": widget.vehicleNumber,
           "docType": widget.docType ?? "OTHER",
+          "userId": AppConstants.userId,
         }),
       );
 

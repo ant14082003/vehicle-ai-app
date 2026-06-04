@@ -56,9 +56,26 @@ TOP_K_CHUNKS  = 6
 # ─────────────────────────────────────────────
 #  In-memory DB
 # ─────────────────────────────────────────────
-vehicles_db    = []
-knowledge_base: dict[str, dict] = {}
-chat_history:   dict[str, list] = {}
+_user_vehicles = {}
+_user_knowledge = {}
+_user_chat = {}
+
+def get_user_vehicles(user_id: str):
+    if user_id not in _user_vehicles:
+        _user_vehicles[user_id] = []
+    return _user_vehicles[user_id]
+
+
+def get_user_knowledge(user_id: str):
+    if user_id not in _user_knowledge:
+        _user_knowledge[user_id] = {}
+    return _user_knowledge[user_id]
+
+
+def get_user_chat(user_id: str):
+    if user_id not in _user_chat:
+        _user_chat[user_id] = {}
+    return _user_chat[user_id]
 
 app = FastAPI()
 app.add_middleware(
@@ -1220,9 +1237,12 @@ def _extract_text_from_pdf_url(url: str) -> str:
         return ""
 
 
-def load_manual_for_vehicle(vehicle_number: str,
-                             model_name: str,
-                             rc_data: dict = None) -> bool:
+def load_manual_for_vehicle(
+    vehicle_number: str,
+    model_name: str,
+    user_id: str,
+    rc_data: dict = None,
+) -> bool:
     """
     Load manual for a vehicle. Priority order:
     1. Already loaded — return immediately
@@ -1231,20 +1251,25 @@ def load_manual_for_vehicle(vehicle_number: str,
 
     The AI fallback means the chat ALWAYS works even without a PDF.
     """
-    if vehicle_number not in knowledge_base:
-        knowledge_base[vehicle_number] = {"manual": [], "bills": []}
+
+    kb = get_user_knowledge(user_id)
+
+    if vehicle_number not in kb:
+        kb[vehicle_number] = {"manual": [], "bills": []}
 
     # Already loaded — skip
-    if knowledge_base[vehicle_number]["manual"]:
+    if kb[vehicle_number]["manual"]:
         print(f"[Manual] Already loaded for {vehicle_number}")
         return True
 
     print(f"[Manual] Loading for: {model_name}")
 
-    # ── PRIORITY 1: Try real PDF manual ───────────────────────────────────────
+    # ── PRIORITY 1: Try real PDF manual ─────────────────────
     pdf_url = _get_manual_url(model_name)
+
     if pdf_url:
         print(f"[Manual] Trying real PDF: {pdf_url[:60]}...")
+
         pdf_text = _extract_text_from_pdf_url(pdf_url)
 
         if pdf_text and len(pdf_text) > 500:
@@ -1252,25 +1277,46 @@ def load_manual_for_vehicle(vehicle_number: str,
                 pdf_text,
                 source_label=f"Owner Manual — {model_name} (Official PDF)"
             )
-            knowledge_base[vehicle_number]["manual"] = chunks
+
+            kb[vehicle_number]["manual"] = chunks
+
             print(f"[Manual] ✅ Loaded from real PDF: {len(chunks)} chunks")
+
             return True
+
         else:
-            print(f"[Manual] ⚠️ PDF extraction failed — "
-                  f"falling back to AI generation")
+            print(
+                f"[Manual] ⚠️ PDF extraction failed — "
+                f"falling back to AI generation"
+            )
 
-    # ── PRIORITY 2: AI Generated manual ──────────────────────────────────────
+    # ── PRIORITY 2: AI Generated manual ─────────────────────
     print(f"[Manual] Generating AI manual for: {model_name}")
-    return _generate_manual_with_ai(vehicle_number, model_name, rc_data)
 
+    return _generate_manual_with_ai(
+        vehicle_number,
+        model_name,
+        user_id,
+        rc_data,
+    )
 
-def _generate_manual_with_ai(vehicle_number: str,
-                               model_name: str,
-                               rc_data: dict = None) -> bool:
+def _generate_manual_with_ai(
+    vehicle_number: str,
+    model_name: str,
+    user_id: str,
+    rc_data: dict = None,
+) -> bool:
     """
     Generate manual content using Groq AI.
     Used as fallback when no real PDF is available.
     """
+    kb = get_user_knowledge(user_id)
+
+    if vehicle_number not in kb:
+        kb[vehicle_number] = {
+            "manual": [],
+            "bills": []
+        }
     rc_context = ""
     if rc_data:
         parts = []
@@ -1342,7 +1388,7 @@ def _generate_manual_with_ai(vehicle_number: str,
             print(f"[Manual] ✗ AI: {section_title}: {e}")
 
     if all_chunks:
-        knowledge_base[vehicle_number]["manual"] = all_chunks
+        kb[vehicle_number]["manual"] = all_chunks
         print(f"[Manual] Total: {len(all_chunks)} AI chunks for "
               f"{vehicle_number}")
         return True
@@ -1428,9 +1474,22 @@ def generate_bill_explanation(ocr_text: str, vehicle_model: str) -> str:
 # ─────────────────────────────────────────────
 #  Chat Helpers
 # ─────────────────────────────────────────────
-def _get_vehicle_context(vehicle_number: str) -> Optional[dict]:
+def _get_vehicle_context(
+    vehicle_number: str,
+    user_id: str,
+) -> Optional[dict]:
+
+    vehicles = get_user_vehicles(user_id)
+
     vn = normalize_vehicle_number(vehicle_number)
-    return next((v for v in vehicles_db if normalize_vehicle_number(v["vehicle_number"]) == vn), None)
+
+    return next(
+        (
+            v for v in vehicles
+            if normalize_vehicle_number(v["vehicle_number"]) == vn
+        ),
+        None,
+    )
 
 
 def _build_context_block(vehicle: dict, query: str, kb: dict) -> str:
@@ -1466,7 +1525,7 @@ CONTEXT: {context}"""
 
 def build_system_prompt(vehicle: dict, context_block: str) -> str:
     number = vehicle.get("vehicle_number", "Unknown")
-    kb     = knowledge_base.get(normalize_vehicle_number(number), {})
+    kb = {"manual": [], "bills": []}
     vehicle_info = (
         f"Vehicle: {number} | Model: {vehicle.get('maker','')} {vehicle.get('model','')}\n"
         f"Fuel: {vehicle.get('fuel_type','')} | Engine: {vehicle.get('engine_cc','')}\n"
@@ -1949,7 +2008,9 @@ def predictive_maintenance(data: MaintenanceRequest):
     """
     try:
         vehicle_number = normalize_vehicle_number(data.vehicleNumber)
-        target = _get_vehicle_context(vehicle_number)
+        user_id = data.userId or "default"
+
+        target = _get_vehicle_context(vehicle_number,user_id,)
         if not target:
             return {"message": "Vehicle not found."}
 
@@ -1957,8 +2018,7 @@ def predictive_maintenance(data: MaintenanceRequest):
         reg_date_str  = target.get("registration_date", "")
         current_km    = data.currentMileage or 0
         bills         = target.get("service_bills", [])
-        kb            = knowledge_base.get(vehicle_number, {})
-        bill_chunks   = kb.get("bills", [])
+        bill_chunks = []
 
         # Calculate vehicle age in months
         vehicle_age_months = 0
@@ -2071,20 +2131,21 @@ def predictive_maintenance(data: MaintenanceRequest):
 #  FEATURE 3: SMART DASHBOARD
 # ─────────────────────────────────────────────
 @app.get("/dashboard")
-def get_dashboard():
+def get_dashboard(userId: str = "default"):
     """
     Returns aggregated data across all vehicles for the smart dashboard.
     Includes expiry alerts, maintenance summaries, document status.
     """
     try:
-        total_vehicles    = len(vehicles_db)
+        vehicles = get_user_vehicles(userId)
+        total_vehicles    = len(vehicles)
         total_documents   = 0
         expiry_alerts     = []
         maintenance_alerts = []
         document_summary  = {"RC": 0, "Insurance": 0, "PUC": 0}
         monthly_reminders = []
 
-        for vehicle in vehicles_db:
+        for vehicle in vehicles:
             vnum  = vehicle["vehicle_number"]
             model = vehicle.get("model", vnum)
             docs  = vehicle.get("documents", [])
@@ -2147,7 +2208,7 @@ def get_dashboard():
 
         # Document completion percentage per vehicle
         vehicle_health = []
-        for vehicle in vehicles_db:
+        for vehicle in vehicles:
             docs  = vehicle.get("documents", [])
             types = {d["type"] for d in docs}
             score = (len(types & {"RC", "Insurance", "PUC"}) / 3) * 100
@@ -2626,6 +2687,15 @@ def root():
 @app.post("/process")
 def process(data: RCUploadRequest):
     try:
+        user_id = data.userId or "default"
+        print("USER ID =", data.userId)
+
+        user_id = data.userId or "default"
+
+        vehicles = get_user_vehicles(user_id)
+        vehicles = get_user_vehicles(user_id)
+        kb = get_user_knowledge(user_id)
+
         text     = run_ocr(data.imageUrl)
         doc_type = detect_doc_type(text)
         if doc_type != "RC":
@@ -2636,7 +2706,7 @@ def process(data: RCUploadRequest):
         if not vehicle_number:
             return {"message": "Could not read vehicle number.", "vehicle_saved": False}
         vehicle_number = normalize_vehicle_number(vehicle_number)
-        for v in vehicles_db:
+        for v in vehicles:
             if normalize_vehicle_number(v["vehicle_number"]) == vehicle_number:
                 return {"message": "Vehicle already exists.", "vehicle_number": vehicle_number,
                         "vehicle_saved": False}
@@ -2648,10 +2718,11 @@ def process(data: RCUploadRequest):
                              "vehicle_class","fitness_upto","insurance_upto","pucc_upto",
                              "chassis_number","engine_number","engine_cc","mfg_date","state"]}
         vehicle = _build_vehicle_dict(vehicle_number, merged, rc_url=data.imageUrl)
-        vehicles_db.append(vehicle)
+        vehicles.append(vehicle)
         model_name = merged.get("model", "")
+
         if model_name:
-            load_manual_for_vehicle(vehicle_number, model_name, rc_data=merged)
+            load_manual_for_vehicle(vehicle_number,model_name,user_id,rc_data=merged,)
         return {"message": "Vehicle created successfully.", "vehicle_number": vehicle_number,
                 "document_type": "RC", "vehicle_saved": True, "details": merged}
     except Exception as e:
@@ -2662,16 +2733,20 @@ def process(data: RCUploadRequest):
 @app.post("/add-vehicle-manual")
 def add_vehicle_manual(data: ManualVehicleRequest):
     vehicle_number = normalize_vehicle_number(data.vehicle_number)
-    for v in vehicles_db:
+    user_id = data.userId or "default"
+
+    vehicles = get_user_vehicles(user_id)
+    kb = get_user_knowledge(user_id)
+    for v in vehicles:
         if normalize_vehicle_number(v["vehicle_number"]) == vehicle_number:
             return {"message": "Vehicle already exists.", "vehicle_number": vehicle_number}
     details = fetch_vehicle_details_from_api(vehicle_number)
     if not details:
         return {"message": "Could not fetch vehicle details."}
     vehicle = _build_vehicle_dict(vehicle_number, details)
-    vehicles_db.append(vehicle)
+    vehicles.append(vehicle)
     if details.get("model"):
-        load_manual_for_vehicle(vehicle_number, details["model"])
+        load_manual_for_vehicle(vehicle_number, details["model"],user_id,)
     return {"message": "Vehicle created", "vehicle": vehicle}
 
 
@@ -2679,8 +2754,11 @@ def add_vehicle_manual(data: ManualVehicleRequest):
 def add_document(data: DocumentUploadRequest):
     try:
         vehicle_number = normalize_vehicle_number(data.vehicleNumber)
+        user_id = data.userId or "default"
+
+        vehicles = get_user_vehicles(user_id)
         doc_type       = data.docType
-        target = next((v for v in vehicles_db
+        target = next((v for v in vehicles
                        if normalize_vehicle_number(v["vehicle_number"]) == vehicle_number), None)
         if not target:
             return {"message": f"Vehicle {vehicle_number} not found."}
@@ -2706,15 +2784,21 @@ def add_document(data: DocumentUploadRequest):
 
 
 @app.delete("/vehicle/{vehicle_number}")
-def delete_vehicle(vehicle_number: str):
+def delete_vehicle(
+    vehicle_number: str,
+    userId: str = "default"
+):
     vehicle_number = normalize_vehicle_number(vehicle_number)
-    idx = next((i for i, v in enumerate(vehicles_db)
+    vehicles = get_user_vehicles(userId)
+    kb = get_user_knowledge(userId)
+    chat = get_user_chat(userId)
+    idx = next((i for i, v in enumerate(vehicles)
                 if normalize_vehicle_number(v["vehicle_number"]) == vehicle_number), None)
     if idx is None:
         return {"message": "Vehicle not found.", "deleted": False}
-    deleted = vehicles_db.pop(idx)
-    knowledge_base.pop(vehicle_number, None)
-    chat_history.pop(vehicle_number, None)
+    deleted = vehicles.pop(idx)
+    kb.pop(vehicle_number, None)
+    chat.pop(vehicle_number, None)
     return {"message": f"Vehicle {vehicle_number} deleted.", "deleted": True,
             "docs_deleted": len(deleted.get("documents", [])),
             "bills_deleted": len(deleted.get("service_bills", []))}
@@ -2724,7 +2808,11 @@ def delete_vehicle(vehicle_number: str):
 def upload_service_bill(data: ServiceBillRequest):
     try:
         vehicle_number = normalize_vehicle_number(data.vehicleNumber)
-        target = next((v for v in vehicles_db
+        user_id = data.userId or "default"
+
+        vehicles = get_user_vehicles(user_id)
+        kb = get_user_knowledge(user_id)
+        target = next((v for v in vehicles
                        if normalize_vehicle_number(v["vehicle_number"]) == vehicle_number), None)
         if not target:
             return {"message": f"Vehicle {vehicle_number} not found."}
@@ -2733,9 +2821,9 @@ def upload_service_bill(data: ServiceBillRequest):
         explanation = generate_bill_explanation(ocr_text, target.get("model", ""))
         bill_chunks = chunk_text(bill_text,
                                  source_label=f"Service Bill ({datetime.now().strftime('%d/%m/%Y')})")
-        if vehicle_number not in knowledge_base:
-            knowledge_base[vehicle_number] = {"manual": [], "bills": []}
-        knowledge_base[vehicle_number]["bills"].extend(bill_chunks)
+        if vehicle_number not in kb:
+            kb[vehicle_number] = {"manual": [], "bills": []}
+        kb[vehicle_number]["bills"].extend(bill_chunks)
         if "service_bills" not in target:
             target["service_bills"] = []
         target["service_bills"].append({
@@ -2752,7 +2840,11 @@ def upload_service_bill(data: ServiceBillRequest):
 def upload_manual(data: ManualUploadRequest):
     try:
         vehicle_number = normalize_vehicle_number(data.vehicleNumber)
-        target = next((v for v in vehicles_db
+        user_id = data.userId or "default"
+
+        vehicles = get_user_vehicles(user_id)
+        kb = get_user_knowledge(user_id)
+        target = next((v for v in vehicles
                        if normalize_vehicle_number(v["vehicle_number"]) == vehicle_number), None)
         if not target:
             return {"message": "Vehicle not found."}
@@ -2763,9 +2855,9 @@ def upload_manual(data: ManualUploadRequest):
             return {"message": "PDF appears image-based. Text could not be extracted."}
         model_name = target.get("model", vehicle_number)
         chunks     = chunk_text(text, source_label=f"Owner Manual — {model_name} (User Uploaded)")
-        if vehicle_number not in knowledge_base:
-            knowledge_base[vehicle_number] = {"manual": [], "bills": []}
-        knowledge_base[vehicle_number]["manual"] = chunks
+        if vehicle_number not in kb:
+            kb[vehicle_number] = {"manual": [], "bills": []}
+        kb[vehicle_number]["manual"] = chunks
         return {"message": f"Manual uploaded. {len(chunks)} sections indexed.",
                 "pages": pdf.page_count, "chunks": len(chunks)}
     except Exception as e:
@@ -2775,6 +2867,10 @@ def upload_manual(data: ManualUploadRequest):
 @app.post("/chat")
 def chat(data: ChatRequest):
     try:
+        user_id = data.userId or "default"
+
+        kb_store = get_user_knowledge(user_id)
+        chat_store = get_user_chat(user_id)
         lookup_number  = normalize_vehicle_number(data.targetVehicleNumber or data.vehicleNumber)
         primary_number = normalize_vehicle_number(data.vehicleNumber)
         vehicle = _get_vehicle_context(lookup_number) or _get_vehicle_context(primary_number)
@@ -2782,13 +2878,13 @@ def chat(data: ChatRequest):
             return {"answer": "I could not find the vehicle."}
         vn         = normalize_vehicle_number(vehicle["vehicle_number"])
         model_name = vehicle.get("model", "")
-        kb         = knowledge_base.get(vn, {"manual": [], "bills": []})
+        kb         = kb_store.get(vn, {"manual": [], "bills": []})
         if model_name and not kb.get("manual"):
-            load_manual_for_vehicle(vn, model_name)
-            kb = knowledge_base.get(vn, {"manual": [], "bills": []})
+            load_manual_for_vehicle(vn,model_name,user_id,)
+            kb = kb_store.get(vn, {"manual": [], "bills": []})
         context_block = _build_context_block(vehicle, data.question, kb)
         system_prompt = build_system_prompt(vehicle, context_block)
-        history       = chat_history.get(primary_number, [])[-10:]
+        history       = chat_store.get(primary_number, [])[-10:]
         messages      = history + [{"role": "user", "content": data.question}]
         groq_messages = [{"role": "system", "content": system_prompt}]
         for msg in messages[:-1]:
@@ -2798,10 +2894,10 @@ def chat(data: ChatRequest):
             model="llama-3.3-70b-versatile", messages=groq_messages,
             max_tokens=1024, temperature=0.3)
         answer = resp.choices[0].message.content
-        if primary_number not in chat_history:
-            chat_history[primary_number] = []
-        chat_history[primary_number].append({"role": "user",      "content": data.question})
-        chat_history[primary_number].append({"role": "assistant", "content": answer})
+        if primary_number not in chat_store:
+            chat_store[primary_number] = []
+        chat_store[primary_number].append({"role": "user",      "content": data.question})
+        chat_store[primary_number].append({"role": "assistant", "content": answer})
         return {"answer": answer, "vehicle_number": vn,
                 "manual_loaded": len(kb.get("manual", [])) > 0,
                 "manual_chunks": len(kb.get("manual", []))}
@@ -2811,30 +2907,39 @@ def chat(data: ChatRequest):
 
 
 @app.delete("/chat/history/{vehicle_number}")
-def clear_chat_history(vehicle_number: str):
+def clear_chat_history(
+    vehicle_number: str,
+    userId: str = "default"
+):
     vn = normalize_vehicle_number(vehicle_number)
-    chat_history.pop(vn, None)
+    chat = get_user_chat(userId)
+    chat.pop(vn, None)
     return {"message": f"Chat history cleared for {vn}"}
 
 
 @app.get("/vehicles")
-def get_vehicles():
-    return vehicles_db
+def get_vehicles(userId: str = "default"):
+    return get_user_vehicles(userId)
 
 
 @app.get("/vehicle/{vehicle_number}")
-def get_vehicle(vehicle_number: str):
+def get_vehicle(
+    vehicle_number: str,
+    userId: str = "default"
+):
     vehicle_number = normalize_vehicle_number(vehicle_number)
-    for v in vehicles_db:
+    vehicles = get_user_vehicles(userId)
+    for v in vehicles:
         if normalize_vehicle_number(v["vehicle_number"]) == vehicle_number:
             return v
     return {"message": "Vehicle not found."}
 
 
 @app.get("/expiry-status")
-def expiry_status_all():
+def expiry_status_all(userId: str = "default"):
     result = []
-    for vehicle in vehicles_db:
+    vehicles = get_user_vehicles(userId)
+    for vehicle in vehicles:
         vnum = vehicle["vehicle_number"]
         for doc in vehicle.get("documents", []):
             if doc["type"] in ("Insurance", "PUC"):
@@ -2849,9 +2954,13 @@ def expiry_status_all():
 
 
 @app.get("/debug/manual/{vehicle_number}")
-def debug_manual(vehicle_number: str):
+def debug_manual(
+    vehicle_number: str,
+    userId: str = "default"
+):
     vn = normalize_vehicle_number(vehicle_number)
-    kb = knowledge_base.get(vn, {})
+    kb_store = get_user_knowledge(userId)
+    kb = kb_store.get(vn, {})
     return {
         "manual_chunks":   len(kb.get("manual", [])),
         "bill_chunks":     len(kb.get("bills", [])),
@@ -2866,8 +2975,13 @@ def download_claim_report(data: ClaimReportRequest):
     Call this AFTER /insurance-claim to get the PDF version.
     """
     try:
+        user_id = data.userId or "default"
         target = _get_vehicle_context(
-            normalize_vehicle_number(data.vehicleNumber))
+            normalize_vehicle_number(
+                data.vehicleNumber
+            ),
+            user_id,
+        )
 
         # Build data dict for PDF
         pdf_data = {

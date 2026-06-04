@@ -53,10 +53,14 @@ class _AddVehicleScreenState extends State<AddVehicleScreen>
       _fetchedVehicle = null;
     });
     try {
+      print("ADD VEHICLE USER ID = ${AppConstants.userId}");
       final res = await http.post(
         Uri.parse("$baseUrl/add-vehicle-manual"),
         headers: {"Content-Type": "application/json"},
-        body: jsonEncode({"vehicle_number": number}),
+        body: jsonEncode({
+          "vehicle_number": number,
+          "userId": AppConstants.userId,
+        }),
       );
       final data = jsonDecode(res.body);
       if (!mounted) return;

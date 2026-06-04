@@ -53,7 +53,9 @@ class _GarageScreenState extends State<GarageScreen>
 
   Future<void> fetchVehicles() async {
     try {
-      final res = await http.get(Uri.parse("$baseUrl/vehicles"));
+      final res = await http.get(
+        Uri.parse("$baseUrl/vehicles?userId=${AppConstants.userId}"),
+      );
       final data = jsonDecode(res.body);
       if (mounted) setState(() => vehicles = data is List ? data : []);
     } catch (e) {
@@ -63,7 +65,9 @@ class _GarageScreenState extends State<GarageScreen>
 
   Future<void> fetchExpiryStatus() async {
     try {
-      final res = await http.get(Uri.parse("$baseUrl/expiry-status"));
+      final res = await http.get(
+        Uri.parse("$baseUrl/expiry-status?userId=${AppConstants.userId}"),
+      );
       final List<dynamic> data = jsonDecode(res.body);
       for (final item in data) {
         final expiry = item["expiry_date"] as String?;
