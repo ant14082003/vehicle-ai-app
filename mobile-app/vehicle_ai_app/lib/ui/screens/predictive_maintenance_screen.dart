@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
-
+import 'package:firebase_auth/firebase_auth.dart';
 import '../../theme/app_theme.dart';
 import '../../constants.dart';
 
@@ -54,6 +54,7 @@ class _PredictiveMaintenanceScreenState
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({
           "vehicleNumber": widget.vehicleNumber,
+          "userId": FirebaseAuth.instance.currentUser!.uid,
           "currentMileage": mileage ?? 0,
         }),
       );

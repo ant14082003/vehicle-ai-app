@@ -8,6 +8,7 @@ import 'package:image_picker/image_picker.dart';
 
 import '../../theme/app_theme.dart';
 import '../../constants.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 class ChatScreen extends StatefulWidget {
   final String vehicleNumber;
@@ -79,6 +80,7 @@ class _ChatScreenState extends State<ChatScreen> {
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({
           "vehicleNumber": widget.vehicleNumber,
+          "userId": FirebaseAuth.instance.currentUser!.uid,
           "question": question,
         }),
       );
@@ -130,6 +132,7 @@ class _ChatScreenState extends State<ChatScreen> {
         body: jsonEncode({
           "imageUrl": url,
           "vehicleNumber": widget.vehicleNumber,
+          "userId": FirebaseAuth.instance.currentUser!.uid,
         }),
       );
       final data = jsonDecode(res.body);

@@ -6,6 +6,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import '../../theme/app_theme.dart';
 import 'vehicle_detail_screen.dart';
 import '../../constants.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -41,7 +42,9 @@ class _DashboardScreenState extends State<DashboardScreen>
   Future<void> _loadDashboard() async {
     setState(() => isLoading = true);
     try {
-      final res = await http.get(Uri.parse("$baseUrl/dashboard"));
+      final uid = FirebaseAuth.instance.currentUser!.uid;
+
+      final res = await http.get(Uri.parse("$baseUrl/dashboard?userId=$uid"));
       final data = jsonDecode(res.body);
       setState(() => dashData = data is Map<String, dynamic> ? data : {});
       _animController.forward(from: 0);

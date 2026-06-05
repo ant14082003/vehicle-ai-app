@@ -1488,22 +1488,26 @@ def generate_bill_explanation(ocr_text: str, vehicle_model: str) -> str:
 # ─────────────────────────────────────────────
 #  Chat Helpers
 # ─────────────────────────────────────────────
-def _get_vehicle_context(
-    vehicle_number: str,
-    user_id: str,
-) -> Optional[dict]:
+def _get_vehicle_context(vehicle_number: str, user_id: str):
+    print("\n========== VEHICLE LOOKUP ==========")
+    print("Requested Vehicle:", vehicle_number)
+    print("Requested User:", user_id)
 
     vehicles = get_user_vehicles(user_id)
 
-    vn = normalize_vehicle_number(vehicle_number)
+    print("Vehicles Found:", len(vehicles))
 
-    return next(
-        (
-            v for v in vehicles
-            if normalize_vehicle_number(v["vehicle_number"]) == vn
-        ),
-        None,
-    )
+    for v in vehicles:
+        print("Stored Vehicle:", v.get("vehicle_number"))
+
+        if normalize_vehicle_number(v.get("vehicle_number", "")) == normalize_vehicle_number(vehicle_number):
+            print("MATCH FOUND")
+            print("===================================\n")
+            return v
+
+    print("NO MATCH FOUND")
+    print("===================================\n")
+    return None
 
 
 def _build_context_block(vehicle: dict, query: str, kb: dict) -> str:
@@ -1912,7 +1916,8 @@ def detect_damage(data: DamageDetectionRequest):
     """
     try:
         vehicle_number = normalize_vehicle_number(data.vehicleNumber)
-        target = _get_vehicle_context(vehicle_number)
+        user_id = data.userId or "default"
+        target = _get_vehicle_context(vehicle_number,user_id)
 
         # Download image and convert to base64 for vision model
         print(f"[Damage] Analysing image for {vehicle_number}...")
@@ -2280,7 +2285,8 @@ def insurance_claim(data: InsuranceClaimRequest):
     """
     try:
         vehicle_number = normalize_vehicle_number(data.vehicleNumber)
-        target = _get_vehicle_context(vehicle_number)
+        user_id = data.userId or "default"
+        target = _get_vehicle_context(vehicle_number,user_id)
         if not target:
             return {"message": "Vehicle not found."}
 
@@ -2956,7 +2962,7 @@ def chat(data: ChatRequest):
         chat_store = get_user_chat(user_id)
         lookup_number  = normalize_vehicle_number(data.targetVehicleNumber or data.vehicleNumber)
         primary_number = normalize_vehicle_number(data.vehicleNumber)
-        vehicle = _get_vehicle_context(lookup_number) or _get_vehicle_context(primary_number)
+        vehicle = (_get_vehicle_context(lookup_number, user_id) or _get_vehicle_context(primary_number, user_id))
         if not vehicle:
             return {"answer": "I could not find the vehicle."}
         vn         = normalize_vehicle_number(vehicle["vehicle_number"])

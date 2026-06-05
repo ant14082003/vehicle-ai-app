@@ -229,7 +229,10 @@ class _VehicleDetailScreenState extends State<VehicleDetailScreen>
         }
       }
       final res = await http.delete(
-        Uri.parse("$baseUrl/vehicle/${widget.vehicleNumber}"),
+        Uri.parse(
+          "$baseUrl/vehicle/${vehicle['vehicle_number']}"
+          "?userId=${AppConstants.userId}",
+        ),
       );
       final data = jsonDecode(res.body);
       if (!mounted) return;

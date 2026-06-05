@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 import '../../theme/app_theme.dart';
 import '../../constants.dart';
@@ -96,6 +97,7 @@ class _DamageDetectionScreenState extends State<DamageDetectionScreen>
         body: jsonEncode({
           "imageUrl": url,
           "vehicleNumber": widget.vehicleNumber,
+          "userId": FirebaseAuth.instance.currentUser!.uid,
         }),
       );
       final data = jsonDecode(res.body);
